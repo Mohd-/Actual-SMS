@@ -1,0 +1,26 @@
+accounts:
+  - actualName: SAB Current Account
+    match:
+      bank: sab
+      accountSuffixes: ['4101', '101', '4187']
+  - actualName: SAB SampleLedger2 Account
+    match:
+      bank: sab
+      accountSuffixes: ['5202', '202']
+  - actualName: Al Rajhi Current Account
+    match:
+      bank: alrajhi
+      hasBalance: false
+      transferIdentifiers: ['7404']
+  - actualName: Al Rajhi SampleLedger4
+    match:
+      bank: alrajhi
+      hasBalance: true
+      transferIdentifiers: ['6303']
+      billPaymentIdentifiers: ['404']
+bankFeesCategory: Bank Fees
+eligibleCategories:
+  - Groceries
+  - Dining
+  - Transportation
+  - Shopping

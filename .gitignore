@@ -1,0 +1,10 @@
+node_modules/
+dist/
+data/
+.env
+.gitenv
+config/accounts.yaml
+compose.host-override.yaml
+compose.proxy.yaml
+actual-cache/
+*.log

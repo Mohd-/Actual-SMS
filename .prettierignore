@@ -1,0 +1,6 @@
+dist/
+node_modules/
+actual-cache/
+data/
+.env
+package-lock.json

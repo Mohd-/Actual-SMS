@@ -1,0 +1,50 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  "model": "opencode-go/glm-5.3-flash",
+  "small_model": "opencode-go/mimo-v2.5",
+
+  "agent": {
+    "build": {
+      "mode": "primary",
+      "model": "opencode-go/glm-5.3-flash",
+      "temperature": 0.1,
+      "permission": {
+        "edit": "allow",
+        "bash": {
+          "*": "allow",
+          "git push*": "ask",
+          "git reset --hard*": "ask",
+          "rm -rf*": "ask"
+        }
+      }
+    },
+
+    "plan": {
+      "mode": "primary",
+      "model": "opencode-go/glm-5.3",
+      "temperature": 0.1,
+      "permission": {
+        "edit": "deny",
+        "bash": {
+          "*": "deny",
+          "git log*": "allow",
+          "git diff*": "allow",
+          "git status*": "allow",
+          "ls*": "allow",
+          "cat *": "allow"
+        }
+      }
+    },
+
+    "explore": {
+      "model": "opencode-go/glm-5.3-flash",
+      "temperature": 0.1
+    },
+
+    "scout": {
+      "model": "opencode-go/glm-5.3-flash",
+      "temperature": 0.1
+    }
+  }
+}

@@ -1,0 +1,4 @@
+services:
+  actual-sms:
+    extra_hosts:
+      - '${ACTUAL_HOSTNAME:?set ACTUAL_HOSTNAME}:${ACTUAL_HOST_IP:?set ACTUAL_HOST_IP}'

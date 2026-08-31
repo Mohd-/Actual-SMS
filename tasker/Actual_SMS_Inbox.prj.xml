@@ -1,0 +1,290 @@
+<TaskerData sr="" dvi="1" tv="6.6.20">
+	<Profile sr="prof1" ve="2">
+		<cdate>1787402400000</cdate>
+		<edate>1787402400000</edate>
+		<flags>8</flags>
+		<id>1</id>
+		<mid0>10</mid0>
+		<nme>Actual SMS Inbox Sync</nme>
+		<Time sr="con0">
+			<fh>-1</fh>
+			<fm>-1</fm>
+			<rep>2</rep>
+			<repval>5</repval>
+			<th>-1</th>
+			<tm>-1</tm>
+		</Time>
+	</Profile>
+	<Project sr="proj0" ve="2">
+		<cdate>1787402400000</cdate>
+		<name>Actual SMS Inbox To Budget</name>
+		<pids>1</pids>
+		<tids>10,11</tids>
+		<ProfileVariable sr="pv0">
+			<clearout>false</clearout>
+			<exportval></exportval>
+			<immutable>false</immutable>
+			<pvci>true</pvci>
+			<pvd>Enter the API_KEY value from the actual-sms .env file. Treat the imported project and Tasker backup as secrets.</pvd>
+			<pvdn>Actual SMS API key</pvdn>
+			<pvid>1</pvid>
+			<pvit>pj</pvit>
+			<pvn>%ActualSmsApiKey</pvn>
+			<pvt>t</pvt>
+			<strout>false</strout>
+		</ProfileVariable>
+		<ProfileVariable sr="pv1">
+			<clearout>false</clearout>
+			<exportval></exportval>
+			<immutable>false</immutable>
+			<pvci>true</pvci>
+			<pvd>Enter the public HTTPS base URL for actual-sms without a trailing slash, for example https://sms.example.test.</pvd>
+			<pvdn>Actual SMS service URL</pvdn>
+			<pvid>2</pvid>
+			<pvit>pj</pvit>
+			<pvn>%ActualSmsServiceUrl</pvn>
+			<pvt>t</pvt>
+			<strout>false</strout>
+		</ProfileVariable>
+	</Project>
+	<Task sr="task10">
+		<cdate>1787402400000</cdate>
+		<edate>1787402400000</edate>
+		<id>10</id>
+		<nme>Sync SMS Inbox To Actual Budget</nme>
+		<pri>10</pri>
+		<Action sr="act0" ve="7">
+			<code>129</code>
+			<Str sr="arg0" ve="3">setLocal("%batchnumber", "0");
+setLocal("%http_response_code", "");
+setLocal("%http_data", "");
+setLocal("%errmsg", "");</Str>
+			<Str sr="arg1" ve="3"/>
+			<Int sr="arg2" val="1"/>
+			<Int sr="arg3" val="45"/>
+		</Action>
+		<Action sr="act1" ve="7">
+			<code>339</code>
+			<se>false</se>
+			<Int sr="arg1" val="1"/>
+			<Str sr="arg2" ve="3">%ActualSmsServiceUrl/v1/inbox-sync/start</Str>
+			<Str sr="arg3" ve="3">Content-Type:application/json
+X-API-Key:%ActualSmsApiKey</Str>
+			<Str sr="arg4" ve="3"/>
+			<Str sr="arg5" ve="3">{}</Str>
+			<Str sr="arg6" ve="3"/>
+			<Str sr="arg7" ve="3"/>
+			<Int sr="arg8" val="30"/>
+			<Int sr="arg9" val="0"/>
+			<Int sr="arg10" val="1"/>
+			<Int sr="arg11" val="0"/>
+			<Int sr="arg12" val="1"/>
+		</Action>
+		<Action sr="act2" ve="7">
+			<code>129</code>
+			<Str sr="arg0" ve="3">var code = typeof http_response_code === "undefined" ? "" : String(http_response_code);
+var response;
+try {
+  response = JSON.parse(String(http_data));
+} catch (_error) {
+  response = null;
+}
+var checkpoint = response &amp;&amp; response.checkpoint;
+var checkpointDate = Number(checkpoint &amp;&amp; checkpoint.date);
+var checkpointId = Number(checkpoint &amp;&amp; checkpoint.rowId);
+if (code !== "200" || !isFinite(checkpointDate) || checkpointDate &lt; 0 || Math.floor(checkpointDate) !== checkpointDate ||
+    !isFinite(checkpointId) || checkpointId &lt; 0 || Math.floor(checkpointId) !== checkpointId) {
+  var detail = typeof errmsg !== "undefined" &amp;&amp; errmsg ? errmsg :
+    (typeof http_data !== "undefined" &amp;&amp; http_data ? http_data : "No response");
+  flashLong("Actual SMS sync could not fetch checkpoint: " + detail);
+  exit();
+}
+setLocal("%syncdate", String(checkpointDate));
+setLocal("%syncid", String(checkpointId));</Str>
+			<Str sr="arg1" ve="3"/>
+			<Int sr="arg2" val="1"/>
+			<Int sr="arg3" val="45"/>
+		</Action>
+		<Action sr="act3" ve="7">
+			<code>667</code>
+			<label>Fetch next batch</label>
+			<Int sr="arg0" val="2"/>
+			<Str sr="arg1" ve="3">content://sms/inbox</Str>
+			<Str sr="arg2" ve="3"/>
+			<Str sr="arg3" ve="3">_id,address,body,date</Str>
+			<Str sr="arg4" ve="3">((date &gt; %syncdate) OR (date = %syncdate AND _id &gt; %syncid))</Str>
+			<Str sr="arg5" ve="3"/>
+			<Str sr="arg6" ve="3">date ASC, _id ASC LIMIT 25</Str>
+			<Str sr="arg7" ve="3">&#9;</Str>
+			<Str sr="arg8" ve="3">%inboxrows</Str>
+			<Int sr="arg9" val="0"/>
+			<Int sr="arg10" val="0"/>
+		</Action>
+		<Action sr="act4" ve="7">
+			<code>129</code>
+			<Str sr="arg0" ve="3">setLocal("%payload", "");
+setLocal("%inboxcount", "");
+setLocal("%inboxrowcount", "");
+setLocal("%inboxlastdate", "");
+setLocal("%inboxlastid", "");
+setLocal("%drainmore", "");
+setLocal("%http_response_code", "");
+setLocal("%http_data", "");
+setLocal("%errmsg", "");
+var rows = typeof inboxrows !== "undefined" &amp;&amp; inboxrows ? inboxrows : [];
+if (!Array.isArray(rows)) rows = [rows];
+if (rows.length === 0) exit();
+var events = [];
+var lastDate = 0;
+var lastId = 0;
+for (var i = 0; i &lt; rows.length; i++) {
+  var parts = String(rows[i]).split("\t");
+  var dateMs = Number(parts[parts.length - 1]);
+  var rowId = Number(parts[0]);
+  var sender = parts.length &gt;= 2 &amp;&amp; parts[1] ? String(parts[1]) : null;
+  var body = parts.length &gt;= 4 ? parts.slice(2, parts.length - 1).join("\t") : null;
+  if (parts.length &lt; 4 || !isFinite(dateMs) || dateMs &lt;= 0 || Math.floor(dateMs) !== dateMs ||
+      !isFinite(rowId) || rowId &lt; 0 || Math.floor(rowId) !== rowId) {
+    flashLong("Actual SMS inbox returned an invalid row identifier; server checkpoint unchanged");
+    exit();
+  }
+  lastDate = dateMs;
+  lastId = rowId;
+  events.push({ rowId: rowId, date: dateMs, sender: sender, message: body });
+}
+var expected = { date: Number(syncdate), rowId: Number(syncid) };
+setLocal("%payload", JSON.stringify({ checkpoint: expected, rows: events }));
+setLocal("%inboxlastdate", String(lastDate));
+setLocal("%inboxlastid", String(lastId));
+setLocal("%inboxcount", String(events.length));
+setLocal("%inboxrowcount", String(rows.length));</Str>
+			<Str sr="arg1" ve="3"/>
+			<Int sr="arg2" val="1"/>
+			<Int sr="arg3" val="45"/>
+		</Action>
+		<Action sr="act5" ve="7">
+			<code>339</code>
+			<se>false</se>
+			<Int sr="arg1" val="1"/>
+			<Str sr="arg2" ve="3">%ActualSmsServiceUrl/v1/inbox-sync/batch</Str>
+			<Str sr="arg3" ve="3">Content-Type:application/json
+X-API-Key:%ActualSmsApiKey</Str>
+			<Str sr="arg4" ve="3"/>
+			<Str sr="arg5" ve="3">%payload</Str>
+			<Str sr="arg6" ve="3"/>
+			<Str sr="arg7" ve="3"/>
+			<Int sr="arg8" val="30"/>
+			<Int sr="arg9" val="0"/>
+			<Int sr="arg10" val="1"/>
+			<Int sr="arg11" val="0"/>
+			<Int sr="arg12" val="1"/>
+			<ConditionList sr="if">
+				<Condition sr="c0" ve="3">
+					<lhs>%inboxcount</lhs>
+					<op>12</op>
+					<rhs></rhs>
+				</Condition>
+			</ConditionList>
+		</Action>
+		<Action sr="act6" ve="7">
+			<code>129</code>
+			<Str sr="arg0" ve="3">var code = typeof http_response_code === "undefined" ? "" : String(http_response_code);
+var response;
+try {
+  response = JSON.parse(String(http_data));
+} catch (_error) {
+  response = null;
+}
+var acknowledged = response &amp;&amp; response.checkpoint;
+var validResponse = code === "202" &amp;&amp; response &amp;&amp; Array.isArray(response.results) &amp;&amp;
+  response.results.length === Number(inboxcount) &amp;&amp; acknowledged &amp;&amp;
+  Number(acknowledged.date) === Number(inboxlastdate) &amp;&amp;
+  Number(acknowledged.rowId) === Number(inboxlastid);
+if (!validResponse) {
+  var detail = typeof errmsg !== "undefined" &amp;&amp; errmsg ? errmsg :
+    (typeof http_data !== "undefined" &amp;&amp; http_data ? http_data : "No response");
+  flashLong("Actual SMS inbox sync failed; server checkpoint controls retry: " + detail);
+  exit();
+}
+setLocal("%syncdate", String(acknowledged.date));
+setLocal("%syncid", String(acknowledged.rowId));
+var completedBatches = Number(batchnumber) + 1;
+setLocal("%batchnumber", String(completedBatches));
+if (Number(inboxrowcount) === 25 &amp;&amp; completedBatches &lt; 10) {
+  inboxrows = [];
+  setLocal("%drainmore", "1");
+}</Str>
+			<Str sr="arg1" ve="3"/>
+			<Int sr="arg2" val="1"/>
+			<Int sr="arg3" val="45"/>
+			<ConditionList sr="if">
+				<Condition sr="c0" ve="3">
+					<lhs>%inboxcount</lhs>
+					<op>12</op>
+					<rhs></rhs>
+				</Condition>
+			</ConditionList>
+		</Action>
+		<Action sr="act7" ve="7">
+			<code>135</code>
+			<Int sr="arg0" val="1"/>
+			<Int sr="arg1" val="1"/>
+			<Str sr="arg2" ve="3">Fetch next batch</Str>
+			<ConditionList sr="if">
+				<Condition sr="c0" ve="3">
+					<lhs>%drainmore</lhs>
+					<op>12</op>
+					<rhs></rhs>
+				</Condition>
+			</ConditionList>
+		</Action>
+	</Task>
+	<Task sr="task11">
+		<cdate>1787402400000</cdate>
+		<edate>1787402400000</edate>
+		<id>11</id>
+		<nme>Reconcile Inbox Last 7 Days</nme>
+		<pri>10</pri>
+		<Action sr="act0" ve="7">
+			<code>129</code>
+			<Str sr="arg0" ve="3">setLocal("%rewindpayload", JSON.stringify({ date: Date.now() - 7 * 24 * 60 * 60 * 1000 }));
+setLocal("%http_response_code", "");
+setLocal("%http_data", "");
+setLocal("%errmsg", "");</Str>
+			<Str sr="arg1" ve="3"/>
+			<Int sr="arg2" val="1"/>
+			<Int sr="arg3" val="45"/>
+		</Action>
+		<Action sr="act1" ve="7">
+			<code>339</code>
+			<se>false</se>
+			<Int sr="arg1" val="1"/>
+			<Str sr="arg2" ve="3">%ActualSmsServiceUrl/v1/inbox-sync/rewind</Str>
+			<Str sr="arg3" ve="3">Content-Type:application/json
+X-API-Key:%ActualSmsApiKey</Str>
+			<Str sr="arg4" ve="3"/>
+			<Str sr="arg5" ve="3">%rewindpayload</Str>
+			<Str sr="arg6" ve="3"/>
+			<Str sr="arg7" ve="3"/>
+			<Int sr="arg8" val="30"/>
+			<Int sr="arg9" val="0"/>
+			<Int sr="arg10" val="1"/>
+			<Int sr="arg11" val="0"/>
+			<Int sr="arg12" val="1"/>
+		</Action>
+		<Action sr="act2" ve="7">
+			<code>129</code>
+			<Str sr="arg0" ve="3">var code = typeof http_response_code === "undefined" ? "" : String(http_response_code);
+if (code === "200") {
+  flashLong("Actual SMS inbox checkpoint rewound seven days; the next sync will reconcile it");
+} else {
+  var detail = typeof errmsg !== "undefined" &amp;&amp; errmsg ? errmsg :
+    (typeof http_data !== "undefined" &amp;&amp; http_data ? http_data : "No response");
+  flashLong("Actual SMS inbox rewind failed: " + detail);
+}</Str>
+			<Str sr="arg1" ve="3"/>
+			<Int sr="arg2" val="1"/>
+			<Int sr="arg3" val="45"/>
+		</Action>
+	</Task>
+</TaskerData>

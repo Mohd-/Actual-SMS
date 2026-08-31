@@ -1,0 +1,33 @@
+services:
+  actual-sms:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      OPENCODE_GO_API_KEY: ${OPENCODE_GO_API_KEY:-}
+      OPENCODE_GO_MODEL: ${OPENCODE_GO_MODEL:-deepseek-v4-flash}
+    ports:
+      - '127.0.0.1:3000:3000'
+    volumes:
+      - sms-data:/data
+      - actual-cache:/actual-cache
+      - ./config/accounts.yaml:/config/accounts.yaml:ro
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:3000/readyz').then(r=>{if(!r.ok)process.exit(1)})",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '5'
+volumes:
+  sms-data:
+  actual-cache:
