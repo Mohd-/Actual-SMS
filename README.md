@@ -36,7 +36,7 @@ The service never creates Actual accounts or categories. It refuses to become re
 
 One bank sender can route to several Actual accounts. A rule always declares its `bank`; it then needs `accountSuffixes`, `transactionKinds`, or `hasBalance: true`/`false`. Rules must not overlap. `transferIdentifiers` is an optional, transfer-only list for destination aliases, and `billPaymentIdentifiers` maps biller codes to destination accounts; neither affects normal routing. Transfer targets are resolved across all configured banks. When a bank identifies accounts in `From`/`To` fields, configure each account's suffixes without transaction-type shortcuts so every matching transaction routes by its source or destination account. Al Rajhi credit-card SMS with a numeric balance can route separately from checking SMS without one. Tasker sends the full message and requires no routing changes.
 
-SMS parsing uses one shared English/Arabic grammar for every supported bank. A separate source resolver identifies the `bank` metadata used by account routing, but does not select a bank-specific parser. Transaction markers and field labels live in the grammar catalog, generic extractors handle amounts, dates, aliases, and names, and the parser applies accounting semantics such as direction and signs. Account numbers and Actual mappings remain configuration, while self-transfer detection remains part of routing and processing.
+SMS parsing uses one shared English/Arabic grammar for every supported bank. A separate source resolver identifies the `bank` metadata used by account routing, but does not select a bank-specific parser. Transaction markers and field extractors live in `config/parsing.yaml`; the shared TypeScript engine converts extracted values and applies accounting semantics such as direction and signs. Account numbers and Actual mappings remain configuration, while self-transfer detection remains part of routing and processing.
 
 ### Adding a bank
 
@@ -65,7 +65,36 @@ IDs must start with a lowercase letter and contain only lowercase letters, digit
 
 Restart the service after changing configuration. The example Compose file mounts the registry at `/config/banks.yaml`; `BANKS_CONFIG_PATH` can select another container-side path if you also mount it there. Existing deployments must add this registry mount when upgrading; existing account mappings need no changes. For host development, point `BANKS_CONFIG_PATH` to `config/banks.yaml`. Setup reads the repository's `config/banks.yaml` by default.
 
-Adding a bank whose messages fit the shared grammar requires only YAML changes. New transaction wording or field labels may still require extending the shared grammar. Unrecognized or malformed messages from registered import banks are retained for review. After enabling a new sender, run **Reconcile Inbox Last 7 Days** to recover recently skipped messages. Already-retained review events are not automatically retried merely by changing bank configuration.
+Adding a bank whose messages fit the shared grammar requires only YAML changes. New transaction wording or field labels can be configured through message templates described below. Unrecognized or malformed messages from registered import banks are retained for review. After enabling a new sender, run **Reconcile Inbox Last 7 Days** to recover recently skipped messages. Already-retained review events are not automatically retried merely by changing bank configuration.
+
+### Custom SMS templates
+
+`config/parsing.yaml` contains the shared English/Arabic defaults and optional `templates`. Each bank in `config/banks.yaml` can reference template IDs with `templates: [example-purchase]`. All banks use the same parser engine.
+
+Append a template under the parser file's `templates` list, for example:
+
+```yaml
+- id: example-purchase
+  match:
+    - source: 'Statement debit'
+      flags: i
+  kind: purchase
+  fields:
+    principal:
+      - source: 'Paid SAR (?<value>[0-9.]+)'
+        flags: u
+  required: [principal, accountAlias]
+```
+
+Patterns run against normalized SMS text (Arabic digits converted, thousands separators removed, whitespace collapsed). Use single-quoted YAML regex strings to preserve backslashes. Flags may contain `i`, `m`, `s`, and `u` once each; the engine controls repeated matching. Scalar extractors must capture `value`; `foreign` captures `amount` and `currency`. All pattern lists are ordered. The shared classifier retains its specific-before-generic order.
+
+Supported fields are `accountAlias`, `accountAliases`, `from`, `to`, `iban`, `beneficiary`, `biller`, `merchant`, `principal`, `total`, `fee`, `balance`, `foreign`, `date`, `sarEquivalent`, and the boolean `cashback` marker. Date interpretation retains the existing supported formats, Riyadh timezone, and received-time fallback. Amount fields describe SAR amounts; foreign amounts are kept separately. No arbitrary conversion code or accounting formulas run from YAML.
+
+Ignored notifications and review-only banks are handled before templates. Exactly one matching template selects its transaction kind and field overrides. Omitted fields inherit shared extractors; an overridden field that does not match stays absent, with no fallback. Missing or invalid required fields produce `needs_review`. Multiple matching templates produce `needs_review` with `ambiguous_template`. No matching template uses the shared grammar. Purchases, refunds, transfers, fees, and account routing retain the same shared accounting logic.
+
+Restart after edits. Compose mounts the parser file at `/config/parsing.yaml`; add this mount to existing deployments. `PARSING_CONFIG_PATH` selects its location (use `config/parsing.yaml` for host development). Setup validates this file and bank template references before writing configuration. Startup rejects invalid versions, fields, flags, regexes, captures, and references rather than falling back to hidden defaults. Bank and parser configuration must be deployed together.
+
+The parser revision is now 15 for the account-reference and transfer-identity corrections. Normal parser-revision replay safeguards still apply; imported events are never replayed. Later YAML edits alone do not trigger historical replay. Test new templates with representative and negative SMS examples before deployment.
 
 The client is pinned exactly to `@actual-app/api` 26.5.2 to match the deployed Actual server. Startup logs both versions. A mismatch or a failure to discover the server version emits a warning but does not prevent readiness; authentication, budget download, and migration failures remain fatal. The image stays on Node 20, which API 26.5.2 supports, and runs as the non-root `node` user with writable `/data` and `/actual-cache` mount points.
 

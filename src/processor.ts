@@ -85,7 +85,13 @@ export class Processor {
   }
   private async process(event: StoredEvent) {
     const input = JSON.parse(event.payload!) as SmsInput;
-    const result = parseSms(input.message, input.receivedAt, this.config.banks, input.sender);
+    const result = parseSms(
+      input.message,
+      input.receivedAt,
+      this.config.banks,
+      input.sender,
+      this.config.parsing,
+    );
     if (result.type === 'ignored' || result.type === 'needs_review') {
       this.store.recordEnrichment(event.id, 'not_applicable', {
         reason: result.type,

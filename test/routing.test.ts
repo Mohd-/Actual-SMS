@@ -1,4 +1,4 @@
-import { banks } from './fixtures/banks.js';
+import { banks, parsing } from './fixtures/banks.js';
 import { describe, expect, it } from 'vitest';
 import { validateAccountRules } from '../src/config.js';
 import { parseSms } from '../src/parser.js';
@@ -67,7 +67,7 @@ describe('account routing', () => {
     ],
     ['Al Rajhi purchase amount SAR 1 at Example Store on 2026-08-22 10:05', 'alrajhi-checking'],
   ])('routes %s to %s', (message, key) => {
-    const result = parseSms(message, receivedAt, banks);
+    const result = parseSms(message, receivedAt, banks, '', parsing);
     if (result.type !== 'transaction') throw new Error(`Expected transaction, got ${result.type}`);
     const transaction = result.transaction;
     expect(resolveAccount(accounts, transaction)?.key).toBe(key);

@@ -13,6 +13,7 @@ const envSchema = z.object({
   OPENCODE_GO_MODEL: z.string().default('deepseek-v4-flash'),
   CONFIG_PATH: z.string().default('/config/accounts.yaml'),
   BANKS_CONFIG_PATH: z.string().default('/config/banks.yaml'),
+  PARSING_CONFIG_PATH: z.string().default('/config/parsing.yaml'),
   DB_PATH: z.string().default('/data/events.sqlite'),
   ACTUAL_CACHE_DIR: z.string().default('/actual-cache'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
@@ -104,6 +105,7 @@ const bankFileSchema = z
           .object({
             id: z.string().regex(/^[a-z][a-z0-9_-]*$/),
             name: z.string().trim().min(1),
+            templates: z.array(z.string().min(1)).optional(),
             senders: z.array(z.string().trim().min(1).max(100)).min(1),
             messageAliases: z.array(z.string().trim().min(1)).default([]),
             disposition: z.enum(['import', 'needs_review']).default('import'),

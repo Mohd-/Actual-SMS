@@ -1,3 +1,7 @@
+import { readFile } from 'node:fs/promises';
+import YAML from 'yaml';
+import { loadParserConfig } from '../src/parsing/config.js';
+import { parsing } from './fixtures/banks.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -47,12 +51,31 @@ describe('YAML bank registry', () => {
     name: Example Bank
     senders: [ExampleBank, Example Bank]
     messageAliases: [Example Bank]
+    templates: [statement]
 `,
     );
     const banks = await loadBankConfigFile(bankPath);
+    const document = YAML.parse(
+      await readFile(new URL('../config/parsing.yaml', import.meta.url), 'utf8'),
+    );
+    document.templates = [
+      {
+        id: 'statement',
+        match: [{ source: 'Statement debit' }],
+        kind: 'purchase',
+        fields: { principal: [{ source: 'Amount SAR (?<value>[0-9.]+)' }] },
+        required: ['principal'],
+      },
+    ];
+    const parsing = await loadParserConfig(
+      await writeConfig('parsing.yaml', YAML.stringify(document)),
+      banks,
+    );
+
     const file = await loadConfigFile(await writeConfig('accounts.yaml', accountYaml()), banks);
     const config: ResolvedConfig = {
       banks,
+      parsing,
       accounts: file.accounts.map(account => ({
         key: 'example-account',
         id: 'example-account',
@@ -94,7 +117,7 @@ describe('YAML bank registry', () => {
       const headers = { 'x-api-key': 'secret' };
       const start = await app.inject({ method: 'POST', url: '/v1/inbox-sync/start', headers });
       const checkpoint = start.json().checkpoint as { date: number; rowId: number };
-      const message = 'Purchase Card **1234 Amount SAR 25.00 at Example Store';
+      const message = 'Statement debit Card **1234 Amount SAR 25.00 at Example Store';
       const response = await app.inject({
         method: 'POST',
         url: '/v1/inbox-sync/batch',
@@ -111,7 +134,9 @@ describe('YAML bank registry', () => {
       expect(importTransactions).toHaveBeenCalledWith('example-account', [
         expect.objectContaining({ amount: -2500, payee_name: 'Example Store' }),
       ]);
-      expect(parseSms(message, new Date().toISOString(), banks, 'ExampleBank')).toMatchObject({
+      expect(
+        parseSms(message, new Date().toISOString(), banks, 'ExampleBank', parsing),
+      ).toMatchObject({
         type: 'transaction',
         transaction: { bank: 'example-bank' },
       });
@@ -162,6 +187,7 @@ describe('YAML bank registry', () => {
         new Date().toISOString(),
         banks,
         'ExampleBank',
+        parsing,
       ),
     ).toEqual({ type: 'needs_review', reason: 'unsupported_sender' });
   });

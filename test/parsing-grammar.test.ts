@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import {
-  extractDate,
-  extractBiller,
-  extractLabelledValue,
-  extractNumericReference,
-} from '../src/parsing/extractors.js';
-import { fieldLabels, transactionKindRules } from '../src/parsing/grammar.js';
+import { createExtractors, extractNumericReference } from '../src/parsing/extractors.js';
+import { parsing } from './fixtures/banks.js';
+const { extractDate, extractBiller, extractLabelledValue } = createExtractors(
+  parsing.shared.fields,
+);
+const transactionKindRules = parsing.shared.kinds;
+const fieldLabels = { from: 'from', to: 'to', iban: 'iban', beneficiary: 'beneficiary' } as const;
 
 describe('shared SMS grammar', () => {
   it('keeps transaction markers in semantic precedence order', () => {

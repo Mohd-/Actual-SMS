@@ -1,0 +1,240 @@
+schemaVersion: 1
+shared:
+  ignored:
+    - value: otp_or_login
+      patterns:
+        - source: (otp|one.?time|verification code|رمز (?:التحقق|التوثيق)|كلمة
+            المرور|login)
+          flags: iu
+    - value: declined_or_insufficient_funds
+      patterns:
+        - source: (insufficient|declined.*fund|رصيد (?:غير كاف|لا يكفي)|لعدم كفاية)
+          flags: iu
+    - value: duplicate_fee_notification
+      patterns:
+        - source: تم خصم دفعة من حسابك
+          flags: iu
+  kinds:
+    - value: transfer_in
+      patterns:
+        - source: \bcredit\s+card\s*[:-]\s*(?:payment|credited)\b
+          flags: iu
+    - value: refund
+      patterns:
+        - source: \bcashback\s+of\b
+          flags: iu
+    - value: card_payment
+      patterns:
+        - source: (?:credit card.*(?:payment|transfer)|card
+            payment|بطاقة\s+[إائ]ئ?تمانية\s*[:：]\s*تسديد|سداد بطاقة|تحويل.*بطاقة
+            ائتمانية|سداد\s+فاتورة(?=[\s\S]*?بطاق[ةه]\s+\S*ئتماني))
+          flags: iu
+    - value: transfer_in
+      patterns:
+        - source: "(?:incoming transfer|transfer received|local credit
+            transfer|reverse(?:d)?
+            transfer|(?:sarie\\s*)?(?:transfer\\s*)?(?:credited|credit(?!\\s+ca\
+            rd\\b))|(?:has\\s+been\\s+)?deposited(?:\\s+into)?|حوالة واردة|حوالة
+            راتب|تحويل وارد|تحويل ائتماني(?: محلي)?|حوالة ائتمانية|تم
+            إيداع|حوالة.*(?:مضافة|معكوسة)|تحويل.*(?:مضاف|معكوس))"
+          flags: iu
+    - value: transfer_out
+      patterns:
+        - source: (?:outgoing transfer|transfer sent|funds?
+            transfer\s+accepted|transfer\s+accepted|accepted.*sarie|sarie.*accepted|حوالة
+            صادرة|تحويل صادر|تم تحويل|تم قبول.*(?:حوالة|تحويل))
+          flags: iu
+    - value: withdrawal
+      patterns:
+        - source: (?:atm|cash withdrawal|سحب نقدي|صراف)
+          flags: iu
+    - value: refund
+      patterns:
+        - source: (?:refund|reverse transaction|reversal|reversed|استرداد|عكس عملية)
+          flags: iu
+    - value: purchase
+      patterns:
+        - source: (?:purchase|\bpos\b|online|e-?commerce|شراء|مشتريات|مدفوعات وزارة
+            الداخلية|سداد\s+فاتورة)
+          flags: iu
+  fields:
+    accountAlias:
+      - source: بطاقة\s+(?:الأول\s+)?مدى-?أثير\s*\((?<value>[\d٠-٩]{3,6})\)
+        flags: iu
+      - source: (?:account|acct|a\/c|حساب|الحساب|بطاقة|card|\bby\s*[:：])[^\d٠-٩]{0,12}(?:[*xX-]*)(?<value>[\d٠-٩]{3,6})
+        flags: iu
+      - source: (?:[*xX]){2,}(?<value>[\d٠-٩]{3,6})
+        flags: u
+    accountAliases:
+      - source: (?:account|acct|a\/c|حساب|الحساب|بطاقة|card)[^\d٠-٩]{0,12}(?:[*xX-]*)(?<value>[\d٠-٩]{3,6})
+        flags: iu
+    merchant:
+      - source: (?:merchant|\bat\b|entity|لدى|متجر|الجهة)\s*[:：]?\s*(?<value>[^,;]+?)(?=\s+(?:on|date|total\s+amount|amount|SAR|SR|for\s+(?:SAR|SR)|(?:available|current)\s+balance|balance|country|fees?\b|رصيد|في|بتاريخ|المبلغ|الرصيد(?:\s+المتاح)?|service|الخدمة)|$)
+        flags: iu
+    date:
+      - source: (?<value>20\d\d[-/]\d{1,2}[-/]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?)
+        flags: ''
+      - source: (?<value>\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2})?)
+        flags: ''
+    from:
+      - source:
+          (?:^|\s)(?:from|من)(?=\s|[:：,،;؛-]|$)\s*[:：,،;؛-]?\s*(?<value>.{1,100}?)(?=\s+(?:(?:from|to|iban|beneficiary(?:\s+name)?|biller|account|amount|purchase\s+amount|transfer\s+amount|fees?(?:\s*(?:&|and)\s*vat)?|balance|date|on|at|من|إلى|الى|آيبان|ايبان|رقم\s*(?:ال)?ايبان|المستفيد(?:\s*الاسم)?|مفوتر|لخدمة|الخدمة|رقم\s*الفاتورة|الحساب|مبلغ(?:\s*العملية)?|المبلغ|رسوم|الرصيد|بتاريخ|في))(?=\s|[:：,،;؛-]|$)\s*[:：,،;؛-]?|\s+(?:on|at|في|بتاريخ)\s*[:：,،;؛-]?\s*(?:20\d{2}[-/]\d{1,2}[-/]\d{1,2}(?:[
+          T]\d{1,2}:\d{2}(?::\d{2})?)?|\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2})?)|[;,؛]|$)
+        flags: iu
+    to:
+      - source:
+          (?:^|\s)(?:to|إلى|الى)(?=\s|[:：,،;؛-]|$)\s*[:：,،;؛-]?\s*(?<value>.{1,100}?)(?=\s+(?:(?:from|to|iban|beneficiary(?:\s+name)?|biller|account|amount|purchase\s+amount|transfer\s+amount|fees?(?:\s*(?:&|and)\s*vat)?|balance|date|on|at|من|إلى|الى|آيبان|ايبان|رقم\s*(?:ال)?ايبان|المستفيد(?:\s*الاسم)?|مفوتر|لخدمة|الخدمة|رقم\s*الفاتورة|الحساب|مبلغ(?:\s*العملية)?|المبلغ|رسوم|الرصيد|بتاريخ|في))(?=\s|[:：,،;؛-]|$)\s*[:：,،;؛-]?|\s+(?:on|at|في|بتاريخ)\s*[:：,،;؛-]?\s*(?:20\d{2}[-/]\d{1,2}[-/]\d{1,2}(?:[
+          T]\d{1,2}:\d{2}(?::\d{2})?)?|\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2})?)|[;,؛]|$)
+        flags: iu
+    iban:
+      - source:
+          (?:^|\s)(?:iban|آيبان|ايبان|رقم\s*(?:ال)?ايبان)(?=\s|[:：,،;؛-]|$)\s*[:：,،;؛-]?\s*(?<value>.{1,100}?)(?=\s+(?:(?:from|to|iban|beneficiary(?:\s+name)?|biller|account|amount|purchase\s+amount|transfer\s+amount|fees?(?:\s*(?:&|and)\s*vat)?|balance|date|on|at|من|إلى|الى|آيبان|ايبان|رقم\s*(?:ال)?ايبان|المستفيد(?:\s*الاسم)?|مفوتر|لخدمة|الخدمة|رقم\s*الفاتورة|الحساب|مبلغ(?:\s*العملية)?|المبلغ|رسوم|الرصيد|بتاريخ|في))(?=\s|[:：,،;؛-]|$)\s*[:：,،;؛-]?|\s+(?:on|at|في|بتاريخ)\s*[:：,،;؛-]?\s*(?:20\d{2}[-/]\d{1,2}[-/]\d{1,2}(?:[
+          T]\d{1,2}:\d{2}(?::\d{2})?)?|\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2})?)|[;,؛]|$)
+        flags: iu
+    beneficiary:
+      - source:
+          (?:^|\s)(?:beneficiary(?:\s+name)?|المستفيد(?:\s*الاسم)?)(?=\s|[:：,،;؛-]|$)\s*[:：,،;؛-]?\s*(?<value>.{1,100}?)(?=\s+(?:(?:from|to|iban|beneficiary(?:\s+name)?|biller|account|amount|purchase\s+amount|transfer\s+amount|fees?(?:\s*(?:&|and)\s*vat)?|balance|date|on|at|من|إلى|الى|آيبان|ايبان|رقم\s*(?:ال)?ايبان|المستفيد(?:\s*الاسم)?|مفوتر|لخدمة|الخدمة|رقم\s*الفاتورة|الحساب|مبلغ(?:\s*العملية)?|المبلغ|رسوم|الرصيد|بتاريخ|في))(?=\s|[:：,،;؛-]|$)\s*[:：,،;؛-]?|\s+(?:on|at|في|بتاريخ)\s*[:：,،;؛-]?\s*(?:20\d{2}[-/]\d{1,2}[-/]\d{1,2}(?:[
+          T]\d{1,2}:\d{2}(?::\d{2})?)?|\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2})?)|[;,؛]|$)
+        flags: iu
+    biller:
+      - source:
+          (?:^|\s)(?:biller|مفوتر)(?=\s|[:：,،;؛-]|$)\s*[:：,،;؛-]?\s*(?<value>.{1,100}?)(?=\s+(?:(?:from|to|iban|beneficiary(?:\s+name)?|biller|account|amount|purchase\s+amount|transfer\s+amount|fees?(?:\s*(?:&|and)\s*vat)?|balance|date|on|at|من|إلى|الى|آيبان|ايبان|رقم\s*(?:ال)?ايبان|المستفيد(?:\s*الاسم)?|مفوتر|لخدمة|الخدمة|رقم\s*الفاتورة|الحساب|مبلغ(?:\s*العملية)?|المبلغ|رسوم|الرصيد|بتاريخ|في))(?=\s|[:：,،;؛-]|$)\s*[:：,،;؛-]?|\s+(?:on|at|في|بتاريخ)\s*[:：,،;؛-]?\s*(?:20\d{2}[-/]\d{1,2}[-/]\d{1,2}(?:[
+          T]\d{1,2}:\d{2}(?::\d{2})?)?|\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2})?)|[;,؛]|$)
+        flags: iu
+    total:
+      - source: total due
+          amount\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*total due amount
+        flags: iu
+      - source: total amount in
+          (?:SAR|SR)\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*total amount in (?:SAR|SR)
+        flags: iu
+      - source: total
+          amount\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*total amount
+        flags: iu
+      - source: المبلغ
+          الإجمالي\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*المبلغ الإجمالي
+        flags: iu
+      - source: اجمالي
+          المبلغ\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*اجمالي المبلغ
+        flags: iu
+    principal:
+      - source: (?<!total\s)amount in
+          (?:SAR|SR)\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*(?<!total\s)amount in
+          (?:SAR|SR)
+        flags: iu
+      - source: (?<!total\s)(?<!due\s)(?<!purchase\s)(?<!transfer\s)amount(?:\s+of)?\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*(?<!total\s)(?<!due\s)(?<!purchase\s)(?<!transfer\s)amount(?:\s+of)?
+        flags: iu
+      - source: credited
+          with\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*credited with
+        flags: iu
+      - source: cashback
+          of\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*cashback of
+        flags: iu
+      - source: purchase
+          amount\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*purchase amount
+        flags: iu
+      - source: transfer
+          amount\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*transfer amount
+        flags: iu
+      - source: مبلغ
+          العملية\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*مبلغ العملية
+        flags: iu
+      - source: (?<!اجمالي\s)المبلغ\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*(?<!اجمالي\s)المبلغ
+        flags: iu
+      - source: بمبلغ\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*بمبلغ
+        flags: iu
+      - source: (?<![\p{L}])مبلغ\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*(?<![\p{L}])مبلغ
+        flags: iu
+    fee:
+      - source: international fees in
+          (?:SAR|SR)\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*international fees in
+          (?:SAR|SR)
+        flags: iu
+      - source: fees?\s*(?:&|and)\s*vat\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*fees?\s*(?:&|and)\s*vat
+        flags: iu
+      - source: fees?\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*fees?
+        flags: iu
+      - source: fee\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*fee
+        flags: iu
+      - source: الرسوم\s*(?:و|and)\s*الضريبة\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*الرسوم\s*(?:و|and)\s*الضريبة
+        flags: iu
+      - source: رسوم\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*رسوم
+        flags: iu
+    balance:
+      - source: available
+          balance\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*available balance
+        flags: iu
+      - source: current
+          balance\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*current balance
+        flags: iu
+      - source: balance\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*balance
+        flags: iu
+      - source: الرصيد
+          المتاح\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*الرصيد المتاح
+        flags: iu
+      - source: الرصيد\s*[:：]?\s*(?:\(\d+\)\s*)?(?:SAR|SR|ر\.?س\.?)?\s*(?<value>[\d,.٠-٩]+)(?![\d,.٠-٩])(?!(?:\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\b))
+        flags: iu
+      - source: (?:SAR|SR|ر\.?س\.?)\s*(?<value>[\d,.٠-٩]+)\s*الرصيد
+        flags: iu
+    sarEquivalent:
+      - source: (?:(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\s*[\d,.]+|[\d,.]+\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY))\s*\(\s*(?:SAR|SR)\s*(?<value>[\d,.]+)\s*\)
+        flags: iu
+      - source: (?:(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)\s*[\d,.]+|[\d,.]+\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY))\s*\(\s*(?<value>[\d,.]+)\s*(?:SAR|SR)\s*\)
+        flags: iu
+    foreign:
+      - source: (?<currency>(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY))\s*(?<amount>[\d,.]+)|(?<trailingAmount>[\d,.]+)\s*(?<trailingCurrency>(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY))
+        flags: i
+    cashback:
+      - source: \bcashback\s+of\b
+        flags: iu
+templates: []

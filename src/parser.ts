@@ -1,23 +1,9 @@
 import type { BankConfig, ParsedTransaction, TxKind } from './types.js';
+import type { ParserConfig } from './parsing/config.js';
 import {
-  amountLabels,
-  fieldLabels,
-  ignoredNotificationRules,
-  transactionKindRules,
-  type PatternRule,
-} from './parsing/grammar.js';
-import {
-  extractAccountAlias,
-  extractAccountAliases,
-  extractAmount,
-  extractBiller,
-  extractDate,
+  createExtractors,
   extractDisplayName,
-  extractForeignAmount,
-  extractLabelledValue,
-  extractMerchant,
   extractNumericReference,
-  extractSarEquivalent,
   normalizeText,
 } from './parsing/extractors.js';
 import { resolveSmsSource } from './sms-source.js';
@@ -33,7 +19,8 @@ export type ParserReason =
   | 'duplicate_fee_notification'
   | 'unsupported_sender'
   | 'unrecognized_template'
-  | 'malformed_notification';
+  | 'malformed_notification'
+  | 'ambiguous_template';
 
 export type ParseResult =
   | { type: 'transaction'; transaction: ParsedTransaction }
@@ -44,14 +31,18 @@ function matches(text: string, patterns: readonly RegExp[]): boolean {
   return patterns.some(pattern => pattern.test(text));
 }
 
-function classify<T>(text: string, rules: readonly PatternRule<T>[]): T | undefined {
+function classify<T>(
+  text: string,
+  rules: readonly { value: T; patterns: readonly RegExp[] }[],
+): T | undefined {
   return rules.find(rule => matches(text, rule.patterns))?.value;
 }
 
-function accountReferences(text: string, kind: TxKind) {
-  const fromValue = extractLabelledValue(text, fieldLabels.from);
-  const toValue = extractLabelledValue(text, fieldLabels.to);
-  const ibanValue = extractLabelledValue(text, fieldLabels.iban);
+function accountReferences(text: string, kind: TxKind, e: ReturnType<typeof createExtractors>) {
+  const { extractLabelledValue, extractAccountAlias, extractAccountAliases } = e;
+  const fromValue = extractLabelledValue(text, 'from');
+  const toValue = extractLabelledValue(text, 'to');
+  const ibanValue = extractLabelledValue(text, 'iban');
   const genericAlias = extractAccountAlias(text);
   const aliases = extractAccountAliases(text);
   const outgoing = kind === 'transfer_out' || kind === 'card_payment';
@@ -76,7 +67,7 @@ function accountReferences(text: string, kind: TxKind) {
   return {
     accountAlias,
     transferCounterpartyAlias,
-    beneficiaryValue: extractLabelledValue(text, fieldLabels.beneficiary),
+    beneficiaryValue: extractLabelledValue(text, 'beneficiary'),
     fromValue,
     toValue,
     outgoing,
@@ -89,9 +80,10 @@ export function parseSms(
   receivedAt: string,
   banks: readonly BankConfig[],
   sender = '',
+  config: ParserConfig,
 ): ParseResult {
   const text = normalizeText(raw);
-  const ignoredReason = classify(text, ignoredNotificationRules);
+  const ignoredReason = classify(text, config.shared.ignored);
   if (ignoredReason) return { type: 'ignored', reason: ignoredReason };
 
   const source = resolveSmsSource(sender, text, banks);
@@ -99,14 +91,44 @@ export function parseSms(
     return { type: source.disposition, reason: 'unsupported_sender' };
   const { bank } = source;
 
-  const kind = classify(text, transactionKindRules);
+  const templates = config.templates.filter(
+    t => banks.find(b => b.id === bank)?.templates?.includes(t.id) && matches(text, t.match),
+  );
+  if (templates.length > 1) return { type: 'needs_review', reason: 'ambiguous_template' };
+  const template = templates[0];
+  const e = createExtractors({ ...config.shared.fields, ...template?.fields });
+  const {
+    extractBiller,
+    extractAmount,
+    extractSarEquivalent,
+    extractForeignAmount,
+    extractMerchant,
+    extractDate,
+  } = e;
+  for (const field of template?.required ?? []) {
+    const raw = e.value(text, field);
+    const valid =
+      field === 'foreign'
+        ? e.extractForeignAmount(text) !== undefined
+        : field === 'accountAliases'
+          ? e.extractAccountAliases(text).length > 0
+          : field === 'cashback'
+            ? e.isCashback(text)
+            : ['total', 'principal', 'fee', 'balance', 'sarEquivalent'].includes(field)
+              ? extractAmount(text, field) !== undefined
+              : field === 'date'
+                ? raw !== undefined && e.isValidDate(text)
+                : raw !== undefined && raw !== '';
+    if (!valid) return { type: 'needs_review', reason: 'malformed_notification' };
+  }
+  const kind = template?.kind ?? classify(text, config.shared.kinds);
   if (!kind) return { type: 'needs_review', reason: 'unrecognized_template' };
 
   const biller = extractBiller(text);
-  const references = accountReferences(text, kind);
-  const total = extractAmount(text, amountLabels.total);
-  const principal = extractAmount(text, amountLabels.principal) ?? extractSarEquivalent(text);
-  const fee = extractAmount(text, amountLabels.fee) ?? 0;
+  const references = accountReferences(text, kind, e);
+  const total = extractAmount(text, 'total');
+  const principal = extractAmount(text, 'principal') ?? extractSarEquivalent(text);
+  const fee = extractAmount(text, 'fee') ?? 0;
   const foreign = extractForeignAmount(text);
   const sar = total ?? (principal === undefined ? undefined : principal + fee);
   if (sar === undefined && !foreign)
@@ -127,12 +149,12 @@ export function parseSms(
     transferName ??
     (kind.includes('transfer') || kind === 'card_payment'
       ? 'Bank transfer'
-      : kind === 'refund' && /\bcashback\s+of\b/iu.test(text)
+      : kind === 'refund' && e.isCashback(text)
         ? 'Card cashback'
         : kind === 'withdrawal'
           ? 'ATM withdrawal'
           : 'Unknown merchant');
-  const balance = extractAmount(text, amountLabels.balance);
+  const balance = extractAmount(text, 'balance');
 
   return {
     type: 'transaction',

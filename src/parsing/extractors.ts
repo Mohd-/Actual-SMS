@@ -1,17 +1,5 @@
 import { DateTime } from 'luxon';
-import {
-  accountAliasPatterns,
-  allAccountAliasesPattern,
-  dateValue,
-  fieldDelimiter,
-  foreignAmountPattern,
-  foreignCurrency,
-  isoDatePattern,
-  labelledFieldStops,
-  merchantPatterns,
-  slashDatePattern,
-} from './grammar.js';
-
+import type { CompiledFields, Field } from './config.js';
 const arabicDigits = '٠١٢٣٤٥٦٧٨٩';
 
 export function normalizeText(value: string): string {
@@ -23,76 +11,10 @@ export function normalizeText(value: string): string {
     .trim();
 }
 
-export function capture(text: string, patterns: readonly RegExp[]): string | undefined {
-  for (const pattern of patterns) {
-    const match = pattern.exec(text);
-    if (match?.[1]) return match[1].trim();
-  }
-}
-
 function money(value?: string): number | undefined {
   if (!value) return;
   const number = Number(normalizeText(value));
   return Number.isFinite(number) ? Math.round(number * 100) : undefined;
-}
-
-export function extractAmount(text: string, labels: readonly string[]): number | undefined {
-  for (const label of labels) {
-    const guardedLabel =
-      label === 'amount'
-        ? '(?<!total\\s)(?<!due\\s)(?<!purchase\\s)(?<!transfer\\s)amount(?:\\s+of)?'
-        : label === 'amount in (?:SAR|SR)'
-          ? `(?<!total\\s)${label}`
-          : label === 'مبلغ'
-            ? '(?<![\\p{L}])مبلغ'
-            : label === 'المبلغ'
-              ? '(?<!اجمالي\\s)المبلغ'
-              : label;
-    const value = capture(text, [
-      new RegExp(
-        `${guardedLabel}\\s*[:：]?\\s*(?:\\(\\d+\\)\\s*)?(?:SAR|SR|ر\\.?س\\.?)?\\s*([\\d,.٠-٩]+)(?![\\d,.٠-٩])(?!(?:\\s*${foreignCurrency}\\b))`,
-        'iu',
-      ),
-      new RegExp(`(?:SAR|SR|ر\\.?س\\.?)\\s*([\\d,.٠-٩]+)\\s*${guardedLabel}`, 'iu'),
-    ]);
-    if (value) return money(value);
-  }
-}
-
-/** SAR equivalent shown in parentheses immediately after a foreign amount. */
-export function extractSarEquivalent(text: string): number | undefined {
-  const value = capture(text, [
-    new RegExp(
-      `(?:${foreignCurrency}\\s*[\\d,.]+|[\\d,.]+\\s*${foreignCurrency})\\s*\\(\\s*(?:SAR|SR)\\s*([\\d,.]+)\\s*\\)`,
-      'iu',
-    ),
-    new RegExp(
-      `(?:${foreignCurrency}\\s*[\\d,.]+|[\\d,.]+\\s*${foreignCurrency})\\s*\\(\\s*([\\d,.]+)\\s*(?:SAR|SR)\\s*\\)`,
-      'iu',
-    ),
-  ]);
-  return money(value);
-}
-
-export function extractAccountAlias(text: string): string | undefined {
-  return capture(text, accountAliasPatterns)?.replace(/[٠-٩]/g, digit =>
-    String(arabicDigits.indexOf(digit)),
-  );
-}
-
-/** Account and card suffixes, retained in their SMS appearance order. */
-export function extractAccountAliases(text: string): string[] {
-  return [...text.matchAll(allAccountAliasesPattern)].map(match => normalizeText(match[1]!));
-}
-
-/** Extract a labelled value without relying on the order of other fields. */
-export function extractLabelledValue(text: string, labels: string): string | undefined {
-  return capture(text, [
-    new RegExp(
-      `(?:^|\\s)${labels}(?=\\s|${fieldDelimiter}|$)\\s*${fieldDelimiter}?\\s*(.{1,100}?)(?=\\s+(?:${labelledFieldStops})(?=\\s|${fieldDelimiter}|$)\\s*${fieldDelimiter}?|\\s+(?:on|at|في|بتاريخ)\\s*${fieldDelimiter}?\\s*${dateValue}|[;,؛]|$)`,
-      'iu',
-    ),
-  ]);
 }
 
 export function extractNumericReference(value?: string): string | undefined {
@@ -118,16 +40,8 @@ export function extractDisplayName(value?: string): string | undefined {
   return /[A-Za-z\u0600-\u06ff]/u.test(name) ? name : undefined;
 }
 
-export function extractBiller(text: string): { identifier?: string; name?: string } {
-  const value = extractLabelledValue(text, '(?:biller|مفوتر)');
-  return {
-    identifier: extractNumericReference(value),
-    name: extractDisplayName(value),
-  };
-}
-
-export function extractDate(text: string, receivedAt: string): string {
-  const iso = capture(text, [isoDatePattern]);
+function decodeDate(text: string, receivedAt: string): string {
+  const iso = text.match(/(20\d\d[-/]\d{1,2}[-/]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?)/)?.[1];
   if (iso) {
     const normalized = iso.replaceAll('/', '-').replace('T', ' ');
     const format = iso.includes(':')
@@ -139,7 +53,7 @@ export function extractDate(text: string, receivedAt: string): string {
     if (date.isValid) return date.toISO()!;
   }
 
-  const slash = capture(text, [slashDatePattern]);
+  const slash = text.match(/(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2})?)/)?.[1];
   if (slash) {
     const fullYear = slash.split(/\s/u, 1)[0]!.split('/').at(-1)?.length === 4;
     const formats = fullYear
@@ -162,17 +76,45 @@ export function extractDate(text: string, receivedAt: string): string {
   return DateTime.fromISO(receivedAt).setZone('Asia/Riyadh').toISO()!;
 }
 
-export function extractForeignAmount(
-  text: string,
-): { currency: string; amount: number } | undefined {
-  const match = foreignAmountPattern.exec(text);
-  if (!match) return;
-  return {
-    currency: (match[3] ?? match[0].slice(0, 3)).toUpperCase(),
-    amount: Number(match[1] ?? match[2]),
+export function createExtractors(fields: CompiledFields) {
+  const groups = (text: string, field: Field) => {
+    for (const pattern of fields[field] ?? []) {
+      const match = pattern.exec(text);
+      if (match) return match.groups;
+    }
   };
-}
-
-export function extractMerchant(text: string): string | undefined {
-  return capture(text, merchantPatterns);
+  const value = (text: string, field: Field) => groups(text, field)?.value?.trim();
+  return {
+    value,
+    extractAmount: (text: string, field: Field) => money(value(text, field)),
+    extractSarEquivalent: (text: string) => money(value(text, 'sarEquivalent')),
+    extractAccountAlias: (text: string) => value(text, 'accountAlias'),
+    extractAccountAliases: (text: string) =>
+      (fields.accountAliases ?? []).flatMap(pattern =>
+        [...text.matchAll(new RegExp(pattern.source, pattern.flags + 'g'))].flatMap(match =>
+          match.groups?.value ? [match.groups.value.trim()] : [],
+        ),
+      ),
+    extractLabelledValue: value,
+    extractBiller: (text: string) => ({
+      identifier: extractNumericReference(value(text, 'biller')),
+      name: extractDisplayName(value(text, 'biller')),
+    }),
+    isValidDate: (text: string) => decodeDate(value(text, 'date') ?? '', 'invalid') != null,
+    extractDate: (text: string, receivedAt: string) =>
+      decodeDate(value(text, 'date') ?? '', receivedAt),
+    extractForeignAmount: (text: string) => {
+      const match = groups(text, 'foreign');
+      if (!match) return;
+      const rawAmount = match.amount ?? match.trailingAmount;
+      if (!rawAmount?.trim()) return;
+      const amount = Number(rawAmount);
+      const currency = match.currency ?? match.trailingCurrency;
+      return Number.isFinite(amount) && currency
+        ? { amount, currency: currency.toUpperCase() }
+        : undefined;
+    },
+    extractMerchant: (text: string) => value(text, 'merchant'),
+    isCashback: (text: string) => (fields.cashback ?? []).some(p => p.test(text)),
+  };
 }

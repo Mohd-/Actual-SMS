@@ -1,3 +1,4 @@
+import { loadParserConfig } from './parsing/config.js';
 import { randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -155,6 +156,10 @@ async function main() {
     const banks = await loadBankConfigFile(
       process.env.BANKS_CONFIG_PATH || resolve('config/banks.yaml'),
     );
+    await loadParserConfig(
+      process.env.PARSING_CONFIG_PATH || resolve('config/parsing.yaml'),
+      banks,
+    );
     const importBanks = banks.filter(bank => bank.disposition === 'import');
     if (!importBanks.length)
       throw new Error('Configure at least one import bank in config/banks.yaml');
@@ -255,6 +260,7 @@ async function main() {
       OPENCODE_GO_MODEL: 'deepseek-v4-flash',
       CONFIG_PATH: '/config/accounts.yaml',
       BANKS_CONFIG_PATH: '/config/banks.yaml',
+      PARSING_CONFIG_PATH: '/config/parsing.yaml',
       DB_PATH: '/data/events.sqlite',
       ACTUAL_CACHE_DIR: '/actual-cache',
       PORT: '3000',

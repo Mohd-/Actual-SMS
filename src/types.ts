@@ -29,6 +29,7 @@ export type TxKind =
 export type Bank = string;
 export interface BankConfig {
   id: Bank;
+  templates?: string[];
   name: string;
   senders: string[];
   /** Legacy sender-optional messages only; never overrides a named sender. */
@@ -73,6 +74,7 @@ export interface AppConfigFile {
 }
 export interface ResolvedConfig {
   banks: BankConfig[];
+  parsing: import('./parsing/config.js').ParserConfig;
   accounts: ResolvedAccount[];
   bankFeesCategoryId: string;
   eligibleCategories: { id: string; name: string }[];

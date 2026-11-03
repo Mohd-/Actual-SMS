@@ -1,4 +1,4 @@
-import { banks } from './fixtures/banks.js';
+import { banks, parsing } from './fixtures/banks.js';
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { EventStore } from '../src/db.js';
@@ -14,6 +14,7 @@ afterEach(() => {
 
 const config: ResolvedConfig = {
   banks,
+  parsing,
   accounts: [
     {
       key: 'sab-checking',
@@ -428,4 +429,28 @@ it('does not let an unrelated credit suppress a configured transfer', async () =
   store.enqueue({ eventId: 'outgoing', sender: 'SAB', message: outgoing, receivedAt });
   await processor.tick();
   expect(transferPayees).toEqual(['alrajhi-checking-id']);
+});
+
+it('skips an unrelated nearest transfer candidate to find the real counterpart', async () => {
+  const { store, processor, imported, transferPayees } = setup();
+  store.enqueue({
+    eventId: 'real-credit',
+    sender: 'AlRajhiBank',
+    message: incoming + ' on 2026-08-22 10:05',
+    receivedAt,
+  });
+  await processor.tick();
+  store.enqueue({
+    eventId: 'unrelated-credit',
+    sender: 'SAB',
+    message: 'Transfer received To: 4101 Amount: SAR 100',
+    receivedAt,
+  });
+  await processor.tick();
+  const count = imported.length;
+  store.enqueue({ eventId: 'debit', sender: 'SAB', message: outgoing, receivedAt });
+  await processor.tick();
+  expect(store.get('debit')?.status).toBe('imported');
+  expect(imported).toHaveLength(count);
+  expect(transferPayees).toEqual(['payroll-id']);
 });

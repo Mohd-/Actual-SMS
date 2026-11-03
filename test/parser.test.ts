@@ -1,11 +1,11 @@
-import { banks } from './fixtures/banks.js';
+import { banks, parsing } from './fixtures/banks.js';
 import { describe, expect, it } from 'vitest';
 import { normalizeText, PARSER_REVISION, parseSms } from '../src/parser.js';
 import { smsFixtures } from './fixtures/sms.js';
 
 describe('SMS parser fixture corpus', () => {
   it.each(smsFixtures)('$provenance: $name', ({ sender, message, receivedAt, expected }) => {
-    expect(parseSms(message, receivedAt, banks, sender)).toStrictEqual(expected);
+    expect(parseSms(message, receivedAt, banks, sender, parsing)).toStrictEqual(expected);
   });
 
   it('tracks the parser release represented by the corpus', () => {
@@ -27,6 +27,7 @@ describe('routing identifier regressions', () => {
         '2026-08-22T10:00:00Z',
         banks,
         'SAB',
+        parsing,
       ),
     ).toMatchObject({ type: 'transaction', transaction: { accountAlias: '8107' } });
   });
@@ -37,6 +38,7 @@ describe('routing identifier regressions', () => {
         '2026-08-22T10:00:00Z',
         banks,
         'SAB',
+        parsing,
       ),
     ).toMatchObject({ type: 'transaction', transaction: { transferCounterpartyAlias: '7404' } });
   });

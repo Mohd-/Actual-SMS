@@ -1,3 +1,4 @@
+import { loadParserConfig } from './parsing/config.js';
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { loadBankConfigFile, loadConfigFile, loadEnv } from './config.js';
@@ -15,6 +16,7 @@ await Promise.all([
   mkdir(env.ACTUAL_CACHE_DIR, { recursive: true }),
 ]);
 const banks = await loadBankConfigFile(env.BANKS_CONFIG_PATH);
+const parsing = await loadParserConfig(env.PARSING_CONFIG_PATH, banks);
 const file = await loadConfigFile(env.CONFIG_PATH, banks);
 const store = new EventStore(env.DB_PATH);
 const actual = new ActualApiAdapter({
@@ -46,6 +48,7 @@ try {
     throw new Error('One or more eligible category names do not exist');
   const config: ResolvedConfig = {
     banks,
+    parsing,
     accounts: resolvedAccounts,
     bankFeesCategoryId: fee[0]!.id,
     eligibleCategories: eligible.map(({ id, name }) => ({ id, name })),

@@ -1,4 +1,4 @@
-import { banks } from './fixtures/banks.js';
+import { banks, parsing } from './fixtures/banks.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { EventStore } from '../src/db.js';
 import { Processor } from '../src/processor.js';
@@ -46,6 +46,7 @@ function setup(suggestion: AiSuggestion | null, shouldThrow = false) {
   };
   const config: ResolvedConfig = {
     banks,
+    parsing,
     accounts: [
       {
         key: 'sab-checking',
