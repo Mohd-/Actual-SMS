@@ -1,6 +1,7 @@
 .git
 .env
 .env.*
+!.env.example
 .gitenv
 .gitenv.*
 config/accounts.yaml

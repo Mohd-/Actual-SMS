@@ -7,6 +7,7 @@ export function resolveConfig(
   parsing: ParserConfig,
   accounts: { id: string; name: string }[],
   categories: ActualCategory[],
+  logger: Pick<Console, 'warn'> = console,
 ): ResolvedConfig {
   const active = categories.filter(category => !category.hidden && !category.isIncome);
   const category = (name: string) => {
@@ -17,7 +18,14 @@ export function resolveConfig(
   };
   const fee = category(file.bankFeesCategory);
   const eligible = file.eligibleCategories?.length
-    ? file.eligibleCategories.map(category)
+    ? file.eligibleCategories.flatMap(name => {
+        const matches = active.filter(value => value.name === name);
+        if (matches.length === 0 && categories.some(value => value.name === name)) {
+          logger.warn(`Configured enrichment category is inactive; excluding: ${name}`);
+          return [];
+        }
+        return [category(name)];
+      })
     : active.filter(value => value.id !== fee.id);
   if (eligible.some(value => value.id === fee.id))
     throw new Error('Bank Fees cannot be an enrichment category');

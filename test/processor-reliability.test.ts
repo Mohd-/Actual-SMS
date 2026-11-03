@@ -35,7 +35,7 @@ function setup() {
   const ledger = new Map<string, { account: string; transaction: ActualTransaction }>();
   const actual: ActualAdapter = {
     initialize: async () => {},
-    serverVersion: async () => '26.5.2',
+    serverVersion: async () => '26.10.0',
     shutdown: async () => {},
     sync: vi.fn(async () => {}),
     accounts: async () => [],

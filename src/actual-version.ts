@@ -1,6 +1,6 @@
 import type { ActualAdapter } from './types.js';
 
-export const ACTUAL_API_VERSION = '26.5.2';
+export const ACTUAL_API_VERSION = '26.10.0';
 
 export interface VersionLogger {
   info(message: string): void;

@@ -17,10 +17,11 @@
     "check": "npm run format:check && npm run lint && npm run typecheck && npm test",
     "setup": "sh scripts/setup-docker.sh",
     "setup:host": "node --import tsx src/setup.ts",
-    "smoke:actual": "node --import tsx scripts/smoke-actual.ts"
+    "smoke:actual": "node --import tsx scripts/smoke-actual.ts",
+    "smoke:disposable": "npm run build && node dist/scripts/smoke-disposable.js"
   },
   "dependencies": {
-    "@actual-app/api": "26.5.2",
+    "@actual-app/api": "26.10.0",
     "better-sqlite3": "^11.10.0",
     "fastify": "^5.5.0",
     "luxon": "^3.7.1",
@@ -41,6 +42,6 @@
     "vitest": "^3.2.4"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }

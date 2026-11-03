@@ -17,21 +17,35 @@ const resolve = (values = categories, settings = file, availableAccounts = accou
   resolveConfig(settings, banks, parsing, availableAccounts, values);
 
 describe('startup name resolution', () => {
-  it.each(['missing', 'duplicate', 'hidden', 'income'])(
-    'rejects a %s configured enrichment category',
+  it.each(['missing', 'duplicate'])('rejects a %s configured enrichment category', kind => {
+    const values =
+      kind === 'missing'
+        ? [categories[0]!]
+        : kind === 'duplicate'
+          ? [...categories, { id: 'other', name: 'Shopping', groupName: 'Another Group' }]
+          : [
+              categories[0]!,
+              { ...categories[1]!, hidden: kind === 'hidden', isIncome: kind === 'income' },
+            ];
+    expect(() => resolve(values)).toThrow(
+      'Active expense category must resolve exactly once: Shopping',
+    );
+  });
+
+  it.each(['hidden', 'income'])(
+    'excludes a configured %s category with a warning while preserving settings',
     kind => {
-      const values =
-        kind === 'missing'
-          ? [categories[0]!]
-          : kind === 'duplicate'
-            ? [...categories, { id: 'other', name: 'Shopping', groupName: 'Another Group' }]
-            : [
-                categories[0]!,
-                { ...categories[1]!, hidden: kind === 'hidden', isIncome: kind === 'income' },
-              ];
-      expect(() => resolve(values)).toThrow(
-        'Active expense category must resolve exactly once: Shopping',
-      );
+      const values = [
+        categories[0]!,
+        { ...categories[1]!, hidden: kind === 'hidden', isIncome: kind === 'income' },
+      ];
+      const warnings: string[] = [];
+      const result = resolveConfig(file, banks, parsing, accounts, values, {
+        warn: message => warnings.push(message),
+      });
+      expect(result.eligibleCategories).toEqual([]);
+      expect(warnings).toHaveLength(1);
+      expect(file.eligibleCategories).toEqual(['Shopping']);
     },
   );
   it('uses only active expense categories by default', () => {

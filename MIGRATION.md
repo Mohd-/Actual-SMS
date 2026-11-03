@@ -20,7 +20,9 @@ Keep the upstream remote fetch-only unless a specific public push has been revie
 - Keep account names, bank IDs, suffixes, and transfer identifiers unchanged for
   the first migration. Existing Actual names must resolve uniquely. Configured fee
   and eligible categories must be active expense categories, and configured eligible
-  category names must be unique across groups.
+  category names must be unique across active expense groups. Configured hidden or
+  income categories are excluded from enrichment with a warning; local settings
+  remain unchanged. Missing names still fail startup.
 - Do not rerun setup with `--force` over an existing deployment. It replaces local
   credentials and account mappings, including the Tasker API key.
 
@@ -60,8 +62,10 @@ reporting now resolves the checkout relative to its script; cron can set
 4. Build the image and check native SQLite and Actual SDK loading with no network,
    production mounts, or credentials. Validate Compose separately with synthetic
    environment settings, including a non-default port and private YAML mounts.
-5. Run the opt-in live smoke test only against a disposable Actual budget and cache
-   with explicit smoke-only credentials. Never substitute production budget settings.
+5. Run the opt-in live smoke test only against a disposable Actual budget and cache.
+   `npm run smoke:disposable` can create and verify removal of its own empty budget
+   using server authentication, without opening the production budget. Never point
+   the existing-budget smoke test at a production budget.
 
 ## Accounting changes
 
@@ -103,3 +107,11 @@ new equal transactions or mishandle incomplete transfers. For rollback, stop the
 new processor and reconcile any Actual writes before restoring a pre-cutover queue
 and cache snapshot. Restoring SQLite does not undo transactions already synced to
 Actual. Keep ingestion paused until the ledger and queue agree.
+
+## Runtime compatibility
+
+Use an Actual server version matching the exact API dependency pin. The image
+and GitHub checks use Node 22. Older API clients must not be assumed compatible
+with newer server migrations. Preserve recovery images privately and prefer a
+client matching the server when recovering; reconcile remote writes before
+restoring local state. The Docker build runs the complete repository check.
