@@ -1,46 +1,151 @@
 # Tasker SMS → Actual Budget
 
-A self-hosted Fastify service that durably queues bank SMS notifications, parses them, optionally enriches merchants, and imports transactions through Actual's official API. Bank IDs and sender aliases are configured in YAML; defaults include SAB, Al Rajhi, Wadaie, and D360.
+Turn bank SMS notifications into transactions in Actual Budget.
 
-## First-time setup
+Tasker checks your Android phone's inbox and sends new messages to this self-hosted service. The service saves supported bank messages to a queue, reads the transaction details, and imports them into your budget through Actual's official API. If your phone goes offline, Tasker picks up where it left off on the next sync.
 
-You need an Android phone with Tasker 6.6, Docker with Compose, Node.js 20+ and npm (to run the setup command), and a reachable Actual Budget server. The bundled Actual API is version 26.5.2; use a matching server version. Create your budget, accounts and categories in Actual first.
+The included configuration supports SAB, Al Rajhi, Wadaie, and D360. STC Bank messages are saved for review without creating transactions. You can add banks and adjust SMS recognition in YAML. You can also enable OpenCode Go to clean up merchant names and suggest categories.
+
+## Get started
+
+### 1. Have these ready
+
+You'll need:
+
+- An Android phone with Tasker 6.6 and SMS permission.
+- A machine with Docker Compose, Node.js 20+, and npm.
+- An Actual Budget server running **26.5.2**, matching the API version bundled with this service.
+- A budget with the accounts and categories you want to use already created in Actual.
+- An HTTPS address your phone can reach, with a reverse proxy forwarding requests to this service.
+
+Have your Actual server URL, server password, and budget Sync ID ready. You can find the Sync ID in Actual under **Settings → Show advanced settings → Sync ID**. If your budget is encrypted, you'll also need its encryption password.
 
 > [!WARNING]
-> Upgrading your Actual server independently can break this service's startup or transaction imports. Keep the Actual server and bundled API versions aligned (currently **26.5.2**). A version mismatch only logs a warning; successful startup does not guarantee compatibility. Follow [Upgrading Actual](#upgrading-actual) when changing versions.
+> Keep the Actual server and this service's bundled API on matching versions. A mismatch logs a warning but may still allow startup, so a healthy service does not guarantee that imports will work. Follow [Upgrading Actual](#upgrading-actual) when updating your server.
 
-From this repository's directory, run `npm run setup`. No host `npm install` is required for Docker setup. Have your Actual server URL, server password, budget Sync ID (Actual **Settings → Show advanced settings → Sync ID**), and optional budget encryption password ready. The wizard reads bank choices from `config/banks.yaml` and lets you select your own existing accounts and categories; add only banks/accounts you use. Add any new bank to that file before running setup. It generates an API key for Tasker. Keep `.env` and `config/accounts.yaml` private.
+### 2. Run the setup wizard
 
-Use an Actual URL reachable from **both** the setup container and the running service. Inside Docker, `localhost` refers to that container; a hostname reachable only on your host will also need a Docker host mapping (see below).
+From this repository's directory, run:
 
-For each account, choose its bank and the identifying suffix printed in its SMS, or the balance/type rule used by that bank. These are SMS identifiers, not Actual account IDs. Example account names and suffixes are illustrative: replace them with your own, and remove unused account entries if configuring manually. The default registry retains STC Bank messages for review without importing transactions.
+```sh
+npm run setup
+```
 
-After starting the service, check `curl --fail http://localhost:3000/readyz` on the server. Configure an HTTPS address reachable from your phone and proxy it to the service. The default Compose port is bound to host loopback; the optional proxy network example supports a containerized reverse proxy.
+You don't need to run `npm install` on the host for Docker setup. This command builds the production image and runs the wizard in a temporary container, avoiding native SQLite dependency problems on the host.
 
-Import `tasker/Actual_SMS_Inbox.prj.xml` through Tasker's project tab menu. Enter your HTTPS service base URL (no trailing slash) and the generated `API_KEY`, enable the imported profile, grant SMS permission, and apply Tasker's changes. The URL is the SMS service URL, not your Actual server URL. If import did not prompt, open the imported project's properties and set **Actual SMS service URL** and **Actual SMS API key** there. Disable battery optimization for Tasker and allow background activity. If you previously installed the immediate-forwarding project, disable or delete it before enabling inbox polling.
+The wizard connects to Actual, downloads your budget, and lets you choose from its open accounts and expense categories. Add only the banks and accounts you use. For each account, choose its bank and how to recognize it: the final digits shown in its SMS, the transaction type, or whether the message includes a balance. These identifiers come from your messages; they aren't Actual account IDs.
 
-Run **Sync SMS Inbox To Actual Budget** once manually; the first sync reads the last seven days. Inspect **GET /v1/events** using the `X-API-Key` header and confirm the resulting transaction in Actual. `needs_review` means you should inspect the event detail. If nothing arrives, check Tasker's run log, SMS permission, HTTPS reachability and project variables. If it queues but cannot import, check service logs and your exact Actual account/category names. When changing the URL or key, update the imported project's variables on the phone too.
+Setup writes `.env` and `config/accounts.yaml`, and generates an API key for Tasker. Both files are private and gitignored. Existing files are left alone unless you explicitly run `npm run setup -- --force`.
 
-## Run
+Use an Actual server URL that both the setup container and the running service can reach. Inside Docker, `localhost` means the container itself. If your Actual hostname needs an explicit IP mapping, see [Docker networking](#docker-networking).
 
-1. Run `npm run setup` on the host. It builds the production image and runs the CLI inside a temporary container, avoiding host-native SQLite compatibility problems. The CLI authenticates with Actual, downloads the selected budget, presents its open accounts and expense categories, and writes `.env` plus `config/accounts.yaml` back to the host. Existing setup files are never replaced unless you explicitly run `npm run setup -- --force`. `npm run setup:host` is available only when host dependencies, including Actual's native SQLite module, were installed successfully.
-2. Alternatively, copy `.env.example` to `.env` and `config/accounts.example.yaml` to `config/accounts.yaml`, then fill them manually. Names must exactly match existing, open Actual accounts and categories. Each account has a `match` rule: use `accountSuffixes` for accounts identified by their SMS suffix, `transactionKinds` for a transaction type, or `hasBalance: true`/`false` when a bank uses balance presence to distinguish accounts. `OPENCODE_GO_API_KEY` is optional; LLM fallback is disabled when it is empty. `ENRICHMENT_MIN_CONFIDENCE` defaults to `0.70`, and `MAPPING_REFRESH_MINUTES` controls how often manual Actual category changes are learned.
-3. Run `docker compose -f compose.example.yaml up --build -d`.
-4. Put the service behind HTTPS or a trusted private reverse proxy. Check `/readyz` before sending events.
+The wizard gets its bank list from `config/banks.yaml`. If your bank isn't listed, [add it](#adding-a-bank) before running setup.
 
-The service never creates Actual accounts or categories. It refuses to become ready if configured names are missing or ambiguous. SQLite queue data and Actual's local cache are persisted in separate volumes. Raw SMS, location, state transitions, mapping decisions, enrichment attempts, and import outcomes are retained indefinitely in SQLite for authenticated audit access. The volume is not encrypted by this service, so protect host and Docker access accordingly.
+### 3. Start the service
 
-`config/accounts.yaml` and `.env` are local-only and gitignored; the tracked example files contain synthetic values. If the Actual hostname needs an explicit container-side address, copy `compose.host-override.example.yaml` to the ignored `compose.host-override.yaml`, set `ACTUAL_HOSTNAME` and `ACTUAL_HOST_IP`, and add `-f compose.host-override.yaml` to the Compose command. The setup container accepts the same Docker mapping as `ACTUAL_SMS_ACTUAL_HOST=actual.example.test:10.0.0.5 npm run setup`. To attach the service to an existing reverse-proxy network, copy `compose.proxy.example.yaml` to the ignored `compose.proxy.yaml`, optionally set `PROXY_NETWORK`, and include that file in the Compose command.
+```sh
+docker compose -f compose.example.yaml up --build -d
+```
 
-## Account routing
+Check that it's ready:
 
-One bank sender can route to several Actual accounts. A rule always declares its `bank`; it then needs `accountSuffixes`, `transactionKinds`, or `hasBalance: true`/`false`. Rules must not overlap. `transferIdentifiers` is an optional, transfer-only list for destination aliases, and `billPaymentIdentifiers` maps biller codes to destination accounts; neither affects normal routing. Transfer targets are resolved across all configured banks. When a bank identifies accounts in `From`/`To` fields, configure each account's suffixes without transaction-type shortcuts so every matching transaction routes by its source or destination account. Al Rajhi credit-card SMS with a numeric balance can route separately from checking SMS without one. Tasker sends the full message and requires no routing changes.
+```sh
+curl --fail http://localhost:3000/readyz
+```
 
-SMS parsing uses one shared English/Arabic grammar for every supported bank. A separate source resolver identifies the `bank` metadata used by account routing, but does not select a bank-specific parser. Transaction markers and field extractors live in `config/parsing.yaml`; the shared TypeScript engine converts extracted values and applies accounting semantics such as direction and signs. Account numbers and Actual mappings remain configuration, while self-transfer detection remains part of routing and processing.
+The default Compose file binds port 3000 to the host's loopback address. Set up your HTTPS reverse proxy to forward requests to it. For a proxy running in Docker, see the [optional proxy network configuration](#docker-networking).
+
+The service checks your configured Actual account and category names at startup. They must match existing, open entries exactly. Missing or ambiguous names prevent the service from becoming ready; it never creates accounts or categories for you.
+
+### 4. Connect Tasker
+
+Copy [`tasker/Actual_SMS_Inbox.prj.xml`](tasker/Actual_SMS_Inbox.prj.xml) to your phone. In Tasker, long-press the project tabs at the bottom, choose **Import Project**, and select the file.
+
+During import, enter:
+
+- **Actual SMS service URL:** this service's HTTPS base URL, with no trailing slash. Use the SMS service URL here, rather than the Actual server URL.
+- **Actual SMS API key:** the generated `API_KEY` from `.env`.
+
+If Tasker doesn't prompt, open the imported project's properties and set those two values there. Enable the imported profile, grant SMS permission, and apply Tasker's changes. Disable battery optimization for Tasker and allow it to run in the background.
+
+If you used the older immediate-forwarding project, disable or delete it before enabling this one. The current project requires a service version that supports `/v1/inbox-sync`.
+
+### 5. Check your first sync
+
+Run **Sync SMS Inbox To Actual Budget** manually once. The first sync reads the last seven days of messages; after that, Tasker checks every five minutes.
+
+View received events using the `X-API-Key` header, then check the imported transactions in Actual:
+
+```sh
+curl --fail \
+  -H 'X-API-Key: YOUR_API_KEY' \
+  https://sms.example.test/v1/events
+```
+
+Replace the example URL and key with your own. An event marked `needs_review` needs a closer look at `GET /v1/events/:id`; see [Event status and review](#event-status-and-review).
+
+If no events arrive, check Tasker's run log, SMS permission, project variables, and access to the HTTPS address. If events arrive but won't import, check the service logs and your Actual account/category names. Whenever you change the service URL or API key, update the project's values on your phone too.
+
+## Configuration
+
+The main configuration files are:
+
+| File                   | What it controls                                                              |
+| ---------------------- | ----------------------------------------------------------------------------- |
+| `.env`                 | Server connection, API keys, file paths, and runtime settings                 |
+| `config/accounts.yaml` | How SMS accounts map to your existing Actual accounts and categories          |
+| `config/banks.yaml`    | Bank IDs, sender names, and whether messages are imported or saved for review |
+| `config/parsing.yaml`  | Shared English/Arabic SMS recognition and optional message templates          |
+
+Restart the service after changing configuration. Keep `.env` and `config/accounts.yaml` private; the tracked examples contain made-up values.
+
+### Manual setup
+
+If you'd rather edit the files yourself, copy `.env.example` to `.env` and `config/accounts.example.yaml` to `config/accounts.yaml`. Replace all example names and suffixes with your own, and remove unused account entries. Account and category names must exactly match existing, open entries in Actual.
+
+Leave `OPENCODE_GO_API_KEY` empty to turn off AI suggestions. `ENRICHMENT_MIN_CONFIDENCE` defaults to `0.70`. `MAPPING_REFRESH_MINUTES` controls how often the service learns category changes you've made in Actual; the default is 60 minutes.
+
+You can also run the wizard with `npm run setup:host` if you've successfully installed the host dependencies, including Actual's native SQLite module.
+
+### Docker networking
+
+If Actual's hostname needs a specific IP address inside Docker, copy `compose.host-override.example.yaml` to `compose.host-override.yaml`, set `ACTUAL_HOSTNAME` and `ACTUAL_HOST_IP`, and include the file when starting the service:
+
+```sh
+docker compose -f compose.example.yaml -f compose.host-override.yaml up --build -d
+```
+
+The setup container accepts the same kind of mapping:
+
+```sh
+ACTUAL_SMS_ACTUAL_HOST=actual.example.test:10.0.0.5 npm run setup
+```
+
+To attach the service to an existing reverse-proxy network, copy `compose.proxy.example.yaml` to `compose.proxy.yaml`, set `PROXY_NETWORK` if needed, and include it with `-f compose.proxy.yaml`. Both local override files are gitignored. You can include both if your deployment needs them.
+
+### Account routing
+
+A single bank sender can send messages for several accounts. Routing rules tell the service which Actual account each message belongs to.
+
+Every rule names a `bank` and uses at least one of these matching options:
+
+| Option                        | Use it when…                                                |
+| ----------------------------- | ----------------------------------------------------------- |
+| `accountSuffixes`             | The SMS identifies an account or card by its final digits   |
+| `transactionKinds`            | The transaction type identifies the account                 |
+| `hasBalance: true` or `false` | The presence or absence of a balance distinguishes accounts |
+
+Rules must not overlap. For example, Al Rajhi credit-card messages with a numeric balance can route separately from checking messages without one.
+
+For transfers, `transferIdentifiers` optionally lists destination aliases. `billPaymentIdentifiers` maps biller codes to destination accounts. These options don't affect ordinary account matching, and transfer destinations can belong to any configured bank. If a bank identifies accounts in `From` and `To` fields, give each account its suffixes without transaction-type shortcuts so the service can match the source or destination correctly.
+
+Tasker always sends the full message, so account routing changes don't require changes on your phone.
+
+D360 uses `bank: d360` and the card suffix shown in the SMS. Set `actualName` to the exact name of your existing Actual account. For an international purchase such as `JPY 878.00 (SAR 20.91)`, the service imports the SAR equivalent plus any separately reported fee and keeps the foreign amount in the notes. It never treats a yen amount as SAR. Run **Reconcile Inbox Last 7 Days** after enabling D360 to pick up messages that were previously skipped.
 
 ### Adding a bank
 
-Edit the tracked registry `config/banks.yaml` to add a bank ID and its SMS sender aliases. The same registry drives the setup wizard, inbox filtering, and parsing. For example, append this entry under `banks`:
+Add the bank to `config/banks.yaml`. This registry supplies the setup wizard's bank list and tells the service how to identify incoming senders. For example, add this entry under `banks`:
 
 ```yaml
 - id: example-bank
@@ -49,7 +154,7 @@ Edit the tracked registry `config/banks.yaml` to add a bank ID and its SMS sende
   disposition: import
 ```
 
-Then add an account route in your local `config/accounts.yaml`, using an existing Actual account name and the suffix printed in your SMS:
+Then add a route under `accounts` in your local `config/accounts.yaml`. Use an existing Actual account name and the suffix shown in your SMS:
 
 ```yaml
 accounts:
@@ -59,19 +164,27 @@ accounts:
       accountSuffixes: ['1234']
 ```
 
-`senders` match the complete sender, ignoring case and extra whitespace; aliases are literal text, not regular expressions or substring patterns. List each spelling your phone receives. Optional `messageAliases` identify a bank only for legacy requests without a sender; matches require word boundaries, and messages matching multiple banks are retained for review. `disposition` defaults to `import`; set it to `needs_review` to retain that bank's messages without importing them or offering it in setup.
+Sender aliases match the whole sender name, ignoring case and extra whitespace. They are literal names, so list each spelling your phone receives; regexes and partial matches aren't supported.
 
-IDs must start with a lowercase letter and contain only lowercase letters, digits, underscores, or hyphens. Keep existing IDs stable: account routing and transaction deduplication use them. Startup rejects duplicate IDs or aliases, unknown account bank IDs, and account routes for review-only banks.
+For older requests that omit the sender, optional `messageAliases` can identify the bank from the message text. These matches require word boundaries. If a message matches more than one bank, it's saved for review.
 
-Restart the service after changing configuration. The example Compose file mounts the registry at `/config/banks.yaml`; `BANKS_CONFIG_PATH` can select another container-side path if you also mount it there. Existing deployments must add this registry mount when upgrading; existing account mappings need no changes. For host development, point `BANKS_CONFIG_PATH` to `config/banks.yaml`. Setup reads the repository's `config/banks.yaml` by default.
+`disposition` defaults to `import`. Set it to `needs_review` to save a bank's messages without importing them. Review-only banks aren't offered in setup and can't have account routes.
 
-Adding a bank whose messages fit the shared grammar requires only YAML changes. New transaction wording or field labels can be configured through message templates described below. Unrecognized or malformed messages from registered import banks are retained for review. After enabling a new sender, run **Reconcile Inbox Last 7 Days** to recover recently skipped messages. Already-retained review events are not automatically retried merely by changing bank configuration.
+Choose a stable bank ID beginning with a lowercase letter and containing only lowercase letters, digits, underscores, or hyphens. Routing and transaction deduplication depend on these IDs. Startup rejects duplicate IDs or aliases, unknown bank IDs in account routes, and routes for review-only banks.
+
+If the bank's wording already fits the shared English/Arabic rules, YAML changes are all you need. For different wording or field labels, add a [custom SMS template](#custom-sms-templates). Messages from registered import banks that can't be understood are saved for review.
+
+Restart after editing the files, then run **Reconcile Inbox Last 7 Days** to recover recent messages from the newly supported sender. Changing bank configuration alone does not retry events already saved for review.
+
+Compose mounts the registry at `/config/banks.yaml`. Older deployments need to add that mount; existing account mappings don't need to change. To use another location, mount the file there and set `BANKS_CONFIG_PATH`. For host development, use `BANKS_CONFIG_PATH=config/banks.yaml`. Setup reads the repository's registry by default.
 
 ### Custom SMS templates
 
-`config/parsing.yaml` contains the shared English/Arabic defaults and optional `templates`. Each bank in `config/banks.yaml` can reference template IDs with `templates: [example-purchase]`. All banks use the same parser engine.
+All banks share one parser engine and a set of English/Arabic rules in `config/parsing.yaml`. Bank identification is a separate step used for routing. The parser reads transaction details; routing and processing handle account matching and transfers between your own accounts.
 
-Append a template under the parser file's `templates` list, for example:
+You can add a template when a bank uses wording the shared rules don't recognize. Add it under `templates` in `config/parsing.yaml`, then reference its ID on the bank entry in `config/banks.yaml` with `templates: [example-purchase]`.
+
+For example:
 
 ```yaml
 - id: example-purchase
@@ -86,67 +199,125 @@ Append a template under the parser file's `templates` list, for example:
   required: [principal, accountAlias]
 ```
 
-Patterns run against normalized SMS text (Arabic digits converted, thousands separators removed, whitespace collapsed). Use single-quoted YAML regex strings to preserve backslashes. Flags may contain `i`, `m`, `s`, and `u` once each; the engine controls repeated matching. Scalar extractors must capture `value`; `foreign` captures `amount` and `currency`. All pattern lists are ordered. The shared classifier retains its specific-before-generic order.
+This recognizes a purchase containing `Statement debit` and extracts its amount from `Paid SAR …`. It uses the shared account extractor and requires both an amount and an account alias.
 
-Supported fields are `accountAlias`, `accountAliases`, `from`, `to`, `iban`, `beneficiary`, `biller`, `merchant`, `principal`, `total`, `fee`, `balance`, `foreign`, `date`, `sarEquivalent`, and the boolean `cashback` marker. Date interpretation retains the existing supported formats, Riyadh timezone, and received-time fallback. Amount fields describe SAR amounts; foreign amounts are kept separately. No arbitrary conversion code or accounting formulas run from YAML.
+Templates work as follows:
 
-Ignored notifications and review-only banks are handled before templates. Exactly one matching template selects its transaction kind and field overrides. Omitted fields inherit shared extractors; an overridden field that does not match stays absent, with no fallback. Missing or invalid required fields produce `needs_review`. Multiple matching templates produce `needs_review` with `ambiguous_template`. No matching template uses the shared grammar. Purchases, refunds, transfers, fees, and account routing retain the same shared accounting logic.
+- Patterns run after Arabic digits are converted, thousands separators are removed, and whitespace is collapsed.
+- Use single-quoted YAML regex strings to preserve backslashes. Flags can include `i`, `m`, `s`, and `u`, each once. The engine handles repeated matching.
+- Scalar field patterns must capture `value`. The `foreign` field captures `amount` and `currency`.
+- Pattern lists run in order. Keep specific transaction kinds, such as card payments and transfers, before generic purchases in the shared rules.
+- Fields you leave out use the shared extractors. If you override a field and its pattern doesn't match, that field stays absent.
 
-Restart after edits. Compose mounts the parser file at `/config/parsing.yaml`; add this mount to existing deployments. `PARSING_CONFIG_PATH` selects its location (use `config/parsing.yaml` for host development). Setup validates this file and bank template references before writing configuration. Startup rejects invalid versions, fields, flags, regexes, captures, and references rather than falling back to hidden defaults. Bank and parser configuration must be deployed together.
+Supported fields are `accountAlias`, `accountAliases`, `from`, `to`, `iban`, `beneficiary`, `biller`, `merchant`, `principal`, `total`, `fee`, `balance`, `foreign`, `date`, `sarEquivalent`, and the boolean marker `cashback`. Amount fields describe SAR amounts; foreign amounts are stored separately. Dates use the supported formats and Riyadh timezone, falling back to the time the SMS was received. YAML templates can't run custom conversion code or accounting formulas.
 
-The parser revision is now 15 for the account-reference and transfer-identity corrections. Normal parser-revision replay safeguards still apply; imported events are never replayed. Later YAML edits alone do not trigger historical replay. Test new templates with representative and negative SMS examples before deployment.
+Ignored notifications and review-only banks are handled before template matching. With exactly one matching template, the service uses its transaction kind and field overrides. With none, it uses the shared rules. Missing or invalid required fields send the message to `needs_review`; multiple matching templates do the same with reason `ambiguous_template`. Purchase, refund, transfer, and fee accounting stays in the shared engine.
 
-The client is pinned exactly to `@actual-app/api` 26.5.2 to match the deployed Actual server. Startup logs both versions. A mismatch or a failure to discover the server version emits a warning but does not prevent readiness; authentication, budget download, and migration failures remain fatal. The image stays on Node 20, which API 26.5.2 supports, and runs as the non-root `node` user with writable `/data` and `/actual-cache` mount points.
+Test new templates against both messages they should match and messages they shouldn't. Restart after edits, and deploy bank and parser configuration together. Setup and startup validate the parser configuration and bank template references. Invalid versions, fields, flags, regexes, captures, or references are rejected.
 
-D360 routes use `bank: d360` and the card suffix in the SMS. Set `actualName` to the exact existing Actual account name before deployment. International purchases such as `JPY 878.00 (SAR 20.91)` import the SAR equivalent plus any separately reported fee and retain the foreign amount in notes. Yen alone is never treated as SAR. After deployment, run **Reconcile Inbox Last 7 Days** to recover D360 messages previously skipped as unsupported.
+Compose mounts this file at `/config/parsing.yaml`; older deployments need to add the mount. `PARSING_CONFIG_PATH` can select another mounted location. For host development, use `PARSING_CONFIG_PATH=config/parsing.yaml`.
+
+The current parser revision is 15, which includes account-reference and transfer-identity fixes. A parser revision can trigger [reprocessing of older events](#event-status-and-review), but editing YAML alone doesn't trigger a historical replay. Imported events are never replayed.
 
 ## Event status and review
 
-Statuses are `queued`, `processing`, `imported`, `imported_review`, `ignored`, `needs_review`, and `failed`. OTP, login, declined, and insufficient-funds notifications are intentionally ignored. Unknown or malformed templates from registered banks and messages from review-only banks are retained as `needs_review`; they do not create an Actual transaction or retry within the current parser revision. `GET /v1/events/:id` includes the original input, complete transition history, enrichment attempts, mapping provenance, the safe `parserReason`, and operational `error` values. `GET /v1/events` provides cursor-paginated summaries with optional `status`, `enrichmentStatus`, `from`, and `to` filters; raw SMS and location appear only in the authenticated detail response. Processing retries use 1 minute, 5 minute, 30 minute, and 2 hour delays; terminal errors stay queryable.
+Use `GET /v1/events` to see what's been received and `GET /v1/events/:id` to inspect a particular message. Both require the `X-API-Key` header.
 
-On startup, each parser revision requeues retained ignored and needs-review notifications from an earlier parser revision once. Events already imported are never replayed. This lets a corrected template import an older missed transaction while Actual's stable import ID prevents duplicates.
+| Status            | Meaning                                                          |
+| ----------------- | ---------------------------------------------------------------- |
+| `queued`          | Saved and waiting to be processed                                |
+| `processing`      | Currently being processed                                        |
+| `imported`        | Imported into Actual                                             |
+| `imported_review` | Imported, but needs your attention                               |
+| `ignored`         | Recognized as a notification that shouldn't create a transaction |
+| `needs_review`    | Saved for inspection without creating a transaction              |
+| `failed`          | Processing failed; details remain available                      |
 
-## Inbox polling (Tasker)
+OTP, login, declined, and insufficient-funds notifications are intentionally ignored. Unrecognized or malformed messages from registered banks, along with messages from review-only banks, are saved as `needs_review`. They don't retry within the same parser revision.
 
-The Tasker 6.6 project at `tasker/Actual_SMS_Inbox.prj.xml` reads the Android SMS database (`content://sms/inbox`) every 5 minutes and uploads everything new, so notifications missed while Tasker is killed, the screen is off, or the device was offline are recovered on the next poll. Copy it to the phone, open Tasker, long-press the project tabs at the bottom, choose **Import Project**, and select the XML file. Enter the service's public HTTPS base URL without a trailing slash and the `API_KEY` value from `.env`, enable the profile, and grant Tasker SMS permission. Exclude Tasker from battery optimization and allow background activity. Deploy a service version supporting `/v1/inbox-sync` before importing this project.
+The event list has cursor pagination and optional `status`, `enrichmentStatus`, `from`, and `to` filters. Event details include the original input, status history, enrichment attempts, the source of merchant/category mappings, `parserReason`, and operational `error` values. Raw SMS and location are available only in the authenticated detail response.
 
-The durable `(date, _id)` checkpoint now belongs to the server, not Tasker. Each task execution fetches it from `POST /v1/inbox-sync/start`, reads all inbox rows after it without a sender filter, and sends batches of 25 oldest-first to `POST /v1/inbox-sync/batch`. Tasker sends the content-provider identifier fields verbatim; the server normalizes and validates them atomically with the checkpoint update. It classifies senders using `config/banks.yaml`, queues import-bank notifications, retains review-only bank messages for review, discards unknown senders or empty messages without storing their content, and advances through every acknowledged row in the same SQLite transaction. One task execution drains at most 10 batches (250 messages); a later poll resumes from the server checkpoint.
+Processing retries wait 1 minute, 5 minutes, 30 minutes, and 2 hours. Events remain available to inspect after a terminal error.
 
-On first use, the server initializes the checkpoint seven days in the past. Existing events remain safe because the endpoint preserves `inbox-v2-<date>-<row _id>` IDs and deduplicates the migration replay. The old `%ActualSmsInboxV2*` Tasker globals are ignored and may be deleted. This protocol supports one active inbox-sync phone; disable the old phone before moving the project to another one.
+When a new parser revision starts, it gives retained `ignored` and `needs_review` events from earlier revisions one more attempt. This allows a parser fix to recover a missed transaction. Already imported events are never replayed, and Actual's stable import IDs prevent duplicates.
 
-- Every inbox SMS after the checkpoint transits the private HTTPS service. Unsupported content is classified in memory and is not written to the event database. Protect the endpoint and API key accordingly.
-- `receivedAt` comes from the inbox `date` column. Location is unavailable during polling and is omitted.
-- The client includes its expected checkpoint in each batch. A concurrent run or rewind produces `409 checkpoint_conflict`, so Tasker stops and fetches the authoritative checkpoint next time instead of skipping rows.
-- Empty SMS bodies are acknowledged as `empty`, unsupported senders as `unsupported`, existing event IDs as `duplicate`, and new bank events as `queued`. Every valid row advances the checkpoint.
-- Network errors and malformed responses require no local recovery state. If the server committed the batch, the next start call sees the advanced checkpoint; otherwise it returns the prior checkpoint.
+## How inbox sync works
 
-The imported project also contains **Reconcile Inbox Last 7 Days**. Wait for an active sync to finish, run it to move the server checkpoint backward by seven days, and let the next poll replay that window safely. Reconciliation is idempotent: if the checkpoint is already farther back than the rolling seven-day boundary, it succeeds without moving it forward. The sync route has a 5 MiB body limit and accepts at most 25 rows per batch. The Tasker SQL Query uses the visible `|~sms~|` column divider. The server also recovers unsplit comma-separated rows sent by older imports whose tab divider was lost, preserving commas and newlines inside SMS bodies.
+The Tasker project reads Android's SMS inbox (`content://sms/inbox`) every five minutes. It resumes from a checkpoint stored on the server, so it can catch up after Tasker stops or the phone loses connectivity. On first use, the checkpoint starts seven days in the past.
 
-## Privacy and accounting behavior
+The service supports one active inbox-sync phone. Disable the old phone's project before moving to another one. The old `%ActualSmsInboxV2*` Tasker globals are no longer used and can be deleted.
 
-Before calling OpenCode Go, the service checks an exact normalized merchant-plus-Actual-account mapping learned from categorized Actual transactions, manual corrections, and prior successful SMS enrichments. Actual history refreshes at startup and hourly by default. A hit reuses the prior payee/category without an LLM request; any active expense category may be reused. Only a miss invokes the best-effort LLM fallback.
+Every SMS after the checkpoint passes through your private HTTPS service. The service checks the sender against `config/banks.yaml`, queues supported bank messages, and saves review-only bank messages for inspection. Unknown senders and empty messages are skipped without storing their content. Polling uses the inbox `date` as `receivedAt` and doesn't include location.
 
-Only normalized merchant text, optional exact location/time context, and configured eligible category IDs/names are sent to OpenCode Go. Raw SMS, balances, account suffixes, aliases, and unrelated personal data are not included. The service uses OpenCode's OpenAI-compatible Chat Completions endpoint in JSON-only mode and validates every response locally. It defaults to `deepseek-v4-flash`; set `OPENCODE_GO_MODEL` to change it. Enrichment is model-only and does not use web search. Provider failure, invalid output, quota exhaustion, rate limits, and timeouts never block a valid import. Categories are applied at confidence 0.70 or above by default; lower-confidence suggestions may normalize the payee but do not set a category. Sanitized request, response, timing, outcome, and failure details are retained in the event audit.
+### Recheck the last seven days
 
-Actual rules remain authoritative. Imports are cleared, deduplicated by stable `imported_id`, retain Actual's default behavior of not reimporting deleted entries, and sync after writes. Foreign-only messages use chronological balance deltas when safe; otherwise a zero-value `REVIEW REQUIRED` transaction is imported.
+Run **Reconcile Inbox Last 7 Days** when you've enabled a bank or want to resend recent inbox messages. Wait for any active sync to finish first.
+
+The task moves the server checkpoint to seven days ago, and the next poll works through that window again. Existing event IDs prevent duplicate imports. If the checkpoint is already farther back, reconciliation leaves it there. Resending an event already saved for review doesn't automatically reprocess it after a configuration change.
+
+### Protocol details
+
+Each Tasker run calls `POST /v1/inbox-sync/start` to get the checkpoint, reads all later inbox rows without filtering senders, and sends the oldest first to `POST /v1/inbox-sync/batch`. Batches contain up to 25 rows; one run sends at most 10 batches, or 250 messages. The next poll continues from there.
+
+The checkpoint tracks the inbox row's `(date, _id)`. Tasker sends these identifier fields as received from Android. The server normalizes and validates them, then saves events and advances the checkpoint in the same SQLite transaction. Event IDs use `inbox-v2-<date>-<row _id>`, which also prevents duplicates when replaying messages during migration.
+
+Each batch includes the checkpoint Tasker expects. If another run or a rewind has changed it, the server returns `409 checkpoint_conflict`. Tasker stops and gets the current checkpoint next time. Network failures don't need local recovery: if the server committed the batch, the next start call returns the advanced checkpoint; otherwise, it returns the previous one.
+
+Valid rows are acknowledged as `empty`, `unsupported`, `duplicate`, or `queued`. Each advances the checkpoint. The sync route has a 5 MiB body limit and accepts at most 25 rows per batch.
+
+The Tasker SQL query uses `|~sms~|` as its column divider. The server also accepts unsplit comma-separated rows from older imports that lost their tab divider, preserving commas and newlines within message bodies.
+
+## Merchant names, categories, and privacy
+
+Before asking AI for help, the service looks for an exact match on the normalized merchant name and Actual account. It learns these mappings from categorized Actual transactions, your manual corrections, and successful SMS enrichments. Actual history refreshes at startup and every hour by default. A match reuses the previous payee and category without an AI request; any active expense category can be reused.
+
+If there's no match and you've configured `OPENCODE_GO_API_KEY`, the service asks OpenCode Go for a merchant name and category suggestion. It sends only normalized merchant text, optional exact location/time context, and the configured eligible category IDs and names. It doesn't send raw SMS, balances, account suffixes, aliases, or unrelated personal data.
+
+The default model is `deepseek-v4-flash`; change it with `OPENCODE_GO_MODEL`. Requests use OpenCode's OpenAI-compatible Chat Completions endpoint in JSON-only mode, and responses are validated locally. This step uses the model without web search.
+
+A category is applied only when confidence meets `ENRICHMENT_MIN_CONFIDENCE`, which defaults to `0.70`. A lower-confidence suggestion may still clean up the payee name. Provider failures, invalid output, quota limits, rate limits, and timeouts don't prevent an otherwise valid transaction from importing. Sanitized requests, responses, timings, outcomes, and failure details are saved in the event audit.
+
+### What stays on your server
+
+The SQLite database keeps raw SMS, any supplied location, status changes, mapping decisions, enrichment attempts, and import outcomes indefinitely for authenticated review. Queue data and Actual's local cache live in separate persistent Docker volumes. This service doesn't encrypt those volumes, so protect access to the host and Docker.
+
+### What gets imported
+
+Actual's rules remain authoritative. Transactions are imported as cleared, use a stable `imported_id` to prevent duplicates, and sync after writes. Actual's default behavior of not reimporting deleted entries is preserved.
+
+For foreign-currency messages without a SAR amount, the service uses chronological balance changes when it can do so safely. Otherwise, it imports a zero-value transaction marked `REVIEW REQUIRED`.
 
 ## Development
 
+Install dependencies, then run the full check:
+
 ```sh
 npm install
-npm test
-npm run typecheck
+npm run check
 ```
 
-Code style is enforced with Prettier and ESLint. Run `npm run format` to apply formatting, `npm run lint:fix` for safe lint fixes, or `npm run check` to run formatting, lint, type checking, and tests together.
+Normal tests don't contact Actual or OpenCode and need no services or environment variables. `npm run check` runs formatting, lint, type checking, and tests in that order. Run it before considering a change complete; this repository has no CI to run it for you.
 
-## License
+Useful commands:
 
-MIT. See `LICENSE`.
+| Command                              | Purpose                                             |
+| ------------------------------------ | --------------------------------------------------- |
+| `npm run dev`                        | Run with automatic reload through tsx               |
+| `npm run build`                      | Compile to `dist/src/main.js`                       |
+| `npm start`                          | Run the compiled service                            |
+| `npm test`                           | Run the regular tests                               |
+| `npx vitest run test/parser.test.ts` | Run one test file; add `-t 'name'` to select a test |
+| `npm run typecheck`                  | Check TypeScript types                              |
+| `npm run format`                     | Apply Prettier formatting                           |
+| `npm run lint:fix`                   | Apply safe ESLint fixes                             |
+
+The service uses Fastify and runs on Node 20 in the production image. The container runs as the non-root `node` user, with writable `/data` and `/actual-cache` mounts.
 
 ### Disposable Actual smoke test
 
-The live smoke test is destructive and refuses to run unless `LIVE_ACTUAL_TEST=1`. Use only a separate disposable budget with a uniquely named test account. It creates a uniquely identified zero-value transaction, verifies it after sync, deletes it, and syncs again. If cleanup fails, the command exits nonzero and prints the identifier for manual removal.
+The live smoke test creates and deletes a transaction. Use a separate, disposable budget with a uniquely named test account. It refuses to run without `LIVE_ACTUAL_TEST=1` and explicit credentials.
+
+The test creates a uniquely identified zero-value transaction, checks it after syncing, deletes it, and syncs again. If cleanup fails, it exits with an error and prints the identifier so you can remove the transaction yourself.
 
 ```sh
 LIVE_ACTUAL_TEST=1 \
@@ -159,8 +330,23 @@ ACTUAL_SMOKE_ACCOUNT_NAME='SMS Smoke Test' \
 npm run smoke:actual
 ```
 
-`ACTUAL_SMOKE_ENCRYPTION_PASSWORD` is optional; all other variables shown are required. These smoke-only credentials do not change production startup configuration. Normal tests never contact Actual or OpenCode. Set `LIVE_OPENCODE_GO_TEST=1` together with an explicit `OPENCODE_GO_API_KEY` to run the opt-in OpenCode Go smoke test.
+`ACTUAL_SMOKE_ENCRYPTION_PASSWORD` is optional; all other variables shown are required. These credentials apply only to the smoke test and don't change production startup settings.
+
+To include the OpenCode Go smoke test in the test run, set `LIVE_OPENCODE_GO_TEST=1` and an explicit `OPENCODE_GO_API_KEY`.
 
 ### Upgrading Actual
 
-Upgrade the Actual server first. Then set `@actual-app/api` to that exact server version (without `^` or `~`), regenerate `package-lock.json`, run `npm run check` and `npm run build`, rebuild the image, and run the disposable smoke test before deployment. Do not ignore `out-of-sync-migrations`: it means the API client must be upgraded to a version containing the server's migrations. The remaining moderate advisory inherited through `@actual-app/crdt` is accepted while compatibility requires the 26.5.2 pin.
+The `@actual-app/api` dependency is pinned to **26.5.2** to match the deployed Actual server. Startup logs both versions. A mismatch, or failure to discover the server version, produces a warning but doesn't prevent readiness. Authentication, budget download, and migration failures do prevent startup.
+
+When upgrading:
+
+1. Upgrade the Actual server.
+2. Set `@actual-app/api` to that exact version, without `^` or `~`, and regenerate `package-lock.json`.
+3. Run `npm run check` and `npm run build`.
+4. Rebuild the Docker image and run the disposable smoke test before deployment.
+
+If you see `out-of-sync-migrations`, update the API client to a version that includes your server's migrations. The moderate advisory inherited through `@actual-app/crdt` is accepted while compatibility requires the 26.5.2 pin.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
