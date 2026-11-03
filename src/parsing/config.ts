@@ -45,7 +45,8 @@ const pattern = z
       .default(''),
   })
   .strict();
-const fields = z.record(field, z.array(pattern).min(1));
+// Templates override selected fields; the shared catalog is checked for completeness below.
+const fields = z.partialRecord(field, z.array(pattern).min(1));
 const schema = z
   .object({
     schemaVersion: z.literal(1),
@@ -103,7 +104,7 @@ export function compileParserConfig(input: unknown): ParserConfig {
     Object.fromEntries(
       Object.entries(values).map(([name, patterns]) => [
         name,
-        patterns.map((p, index) => {
+        (patterns ?? []).map((p, index) => {
           const regex = compile(p, `${path}.${name}[${index}]`);
           if (name !== 'cashback') {
             const groups = name === 'foreign' ? ['amount', 'currency'] : ['value'];
