@@ -281,17 +281,17 @@ export class EventStore {
       .prepare('INSERT OR IGNORE INTO balances VALUES(?,?,?,?)')
       .run(alias, at, balance, event);
   }
-  findTransferCounterpart(
+  findTransferCounterparts(
     eventId: string,
     alias: string,
     amount: number,
     at: string,
-  ): { event_id: string } | undefined {
+  ): { event_id: string; source_alias: string }[] {
     return this.db
       .prepare(
-        'SELECT event_id FROM transfers WHERE event_id<>? AND source_alias<>? AND principal_cents=? AND julianday(occurred_at) BETWEEN julianday(?) - 15.0 / 1440 AND julianday(?) + 15.0 / 1440 AND matched_event_id IS NULL ORDER BY ABS(julianday(occurred_at)-julianday(?)) LIMIT 1',
+        'SELECT event_id,source_alias FROM transfers WHERE event_id<>? AND source_alias<>? AND principal_cents=? AND julianday(occurred_at) BETWEEN julianday(?) - 15.0 / 1440 AND julianday(?) + 15.0 / 1440 AND matched_event_id IS NULL ORDER BY ABS(julianday(occurred_at)-julianday(?))',
       )
-      .get(eventId, alias, -amount, at, at, at) as { event_id: string } | undefined;
+      .all(eventId, alias, -amount, at, at, at) as { event_id: string; source_alias: string }[];
   }
   recordTransfer(
     eventId: string,

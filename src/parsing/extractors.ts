@@ -97,7 +97,10 @@ export function extractLabelledValue(text: string, labels: string): string | und
 
 export function extractNumericReference(value?: string): string | undefined {
   if (!value) return;
-  const digits = normalizeText(value).match(/\d{3,}/u)?.[0];
+  const text = normalizeText(value);
+  const iban = text.match(/\bSA\d{2}(?:\s*\d){20}(?!\d)/iu)?.[0];
+  if (iban) return iban.replace(/\s/gu, '').slice(-4);
+  const digits = text.match(/\d{3,}/u)?.[0];
   if (!digits) return;
   return digits.length <= 6 ? digits : digits.slice(-4);
 }

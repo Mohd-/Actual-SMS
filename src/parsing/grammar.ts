@@ -71,7 +71,7 @@ export const transactionKindRules: readonly PatternRule<TxKind>[] = [
 
 export const accountAliasPatterns = [
   /بطاقة\s+(?:الأول\s+)?مدى-?أثير\s*\(([\d٠-٩]{3,6})\)/iu,
-  /(?:account|acct|a\/c|حساب|الحساب|بطاقة|card|by)[^\d٠-٩]{0,12}(?:[*xX-]*)([\d٠-٩]{3,6})/iu,
+  /(?:account|acct|a\/c|حساب|الحساب|بطاقة|card|\bby\s*[:：])[^\d٠-٩]{0,12}(?:[*xX-]*)([\d٠-٩]{3,6})/iu,
   /(?:[*xX]){2,}([\d٠-٩]{3,6})/u,
 ] as const;
 

@@ -25,7 +25,7 @@ import { resolveSmsSource } from './sms-source.js';
 export { normalizeText } from './parsing/extractors.js';
 
 /** Increment when a parser release should re-evaluate retained parser outcomes. */
-export const PARSER_REVISION = 14;
+export const PARSER_REVISION = 15;
 
 export type ParserReason =
   | 'otp_or_login'

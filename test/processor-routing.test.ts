@@ -415,3 +415,17 @@ describe('processor transfer routing', () => {
     expect(new Set(ids)).toHaveLength(2);
   });
 });
+
+it('does not let an unrelated credit suppress a configured transfer', async () => {
+  const { store, processor, transferPayees } = setup();
+  store.enqueue({
+    eventId: 'external',
+    sender: 'SAB',
+    message: 'Transfer received To: 4101 Amount: SAR 100',
+    receivedAt,
+  });
+  await processor.tick();
+  store.enqueue({ eventId: 'outgoing', sender: 'SAB', message: outgoing, receivedAt });
+  await processor.tick();
+  expect(transferPayees).toEqual(['alrajhi-checking-id']);
+});

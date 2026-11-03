@@ -197,12 +197,30 @@ export class Processor {
       .filter(Boolean)
       .join(' | ');
     if (isTransfer) {
-      const counterpart = this.store.findTransferCounterpart(
-        event.id,
-        account.key,
-        tx.principalCents ?? tx.amountCents,
-        tx.occurredAt,
-      );
+      const counterpart = this.store
+        .findTransferCounterparts(
+          event.id,
+          account.key,
+          tx.principalCents ?? tx.amountCents,
+          tx.occurredAt,
+        )
+        .find(candidate => {
+          const prior = JSON.parse(
+            this.store.get(candidate.event_id)!.parsed!,
+          ) as ParsedTransaction;
+          if (!['transfer_in', 'transfer_out', 'card_payment'].includes(prior.kind)) return false;
+          const targetOf = (value: ParsedTransaction) =>
+            value.billPaymentIdentifier
+              ? resolveBillPaymentAccount(this.config.accounts, value.billPaymentIdentifier)
+              : value.transferCounterpartyAlias
+                ? resolveTransferAccount(this.config.accounts, value.transferCounterpartyAlias)
+                : undefined;
+          const currentTarget = targetOf(tx);
+          const priorTarget = targetOf(prior);
+          if (currentTarget && currentTarget.key !== candidate.source_alias) return false;
+          if (priorTarget && priorTarget.key !== account.key) return false;
+          return currentTarget !== undefined || priorTarget !== undefined;
+        });
       const counterpartTx = counterpart
         ? (JSON.parse(this.store.get(counterpart.event_id)!.parsed!) as ParsedTransaction)
         : undefined;
