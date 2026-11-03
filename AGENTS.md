@@ -2,7 +2,7 @@
 
 ## Commands
 
-- `npm run check` — full gate in strict order: `format:check` → `lint` → `typecheck` → `test`. Run this before considering work done (no CI exists; this is the only enforcement).
+- `npm run check` — full gate in strict order: `format:check` → `lint` → `typecheck` → `test`. Run this before considering work done. The GitHub workflow also runs this gate and the build on Node 20.
 - Single test file: `npx vitest run test/parser.test.ts`. Single test: add `-t 'name'`.
 - `npm run lint` uses `--max-warnings 0` — zero-tolerance.
 - `npm run build` outputs `dist/src/main.js` (what `npm start` runs); `npm run dev` uses tsx watch.
@@ -33,3 +33,4 @@ Single Fastify service that queues Tasker SMS events, parses them, and imports t
 - Secrets/config are local-only and gitignored: `.env` (from `.env.example`), `.gitenv`, and `config/accounts.yaml` (from `config/accounts.example.yaml`).
 - `better-sqlite3` needs native builds; `npm run setup` (scripts/setup-docker.sh) runs the setup CLI inside Docker to avoid host-native SQLite issues. `setup:host` only works if host deps built successfully.
 - Deployment is Docker Compose (`compose.example.yaml`). Optional examples add a reverse-proxy network or an explicit Actual hostname/IP mapping; the base Compose file has neither assumption.
+- Preserve `event_import_ids` with the queue: it retains pre-upgrade import IDs and distinguishes later equal transactions. Never run two ingestion projects or two processors against the same budget during cutover. See `MIGRATION.md` for deployment and rollback requirements.

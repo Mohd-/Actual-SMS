@@ -1,10 +1,16 @@
-node_modules/
+node_modules
 dist/
 data/
 .env
 .gitenv
+.env.*
+!.env.example
+.gitenv.*
 config/accounts.yaml
+config/*.local.yaml
+compose.local.yaml
 compose.host-override.yaml
 compose.proxy.yaml
 actual-cache/
+.migration-private/
 *.log

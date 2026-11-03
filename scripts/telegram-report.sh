@@ -4,8 +4,8 @@
 # and binaries are resolved by absolute path.
 set -eu
 
-REPO_DIR=/home/user/projects/actual-sms
-OPENCODE_BIN=/home/user/.opencode/bin/opencode
+REPO_DIR="${ACTUAL_SMS_REPO_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}"
+OPENCODE_BIN="${OPENCODE_BIN:-opencode}"
 WINDOW="${1:-last 24 hours}"
 
 cd "$REPO_DIR"

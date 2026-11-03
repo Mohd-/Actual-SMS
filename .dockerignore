@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+.gitenv
+.gitenv.*
+config/accounts.yaml
+config/*.local.yaml
+compose.local.yaml
+compose.host-override.yaml
+compose.proxy.yaml
+node_modules
+dist
+data
+actual-cache
+.migration-private
+*.log
