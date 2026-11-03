@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventStore } from '../src/db.js';
 let stores: EventStore[] = [];
@@ -124,4 +125,31 @@ describe('event store', () => {
     expect(s.eventHistory(id).map(entry => entry.to_status)).toEqual(['queued', 'ignored']);
     expect(s.enrichmentAttempts(id)).toHaveLength(1);
   });
+});
+
+it('deduplicates equivalent receipt timestamps but retains identical text received on a different day', () => {
+  const store = new EventStore(':memory:');
+  stores.push(store);
+  const input = {
+    sender: 'SAB',
+    message: 'Purchase at Example Store Amount SAR 25',
+    receivedAt: '2026-08-22T10:00:00+03:00',
+  };
+  const first = store.enqueue(input);
+  expect(store.enqueue({ ...input, receivedAt: '2026-08-22T07:00:00.000Z' })).toEqual({
+    id: first.id,
+    duplicate: true,
+  });
+  expect(store.enqueue({ ...input, receivedAt: '2026-08-23T07:00:00Z' }).duplicate).toBe(false);
+});
+
+it('recognizes an old hash only for the same original receipt timestamp', () => {
+  const store = new EventStore(':memory:');
+  stores.push(store);
+  const input = { sender: 'SAB', message: 'hello world', receivedAt: '2026-08-22T07:00:00Z' };
+  const first = store.enqueue(input);
+  const legacy = 'hash:' + createHash('sha256').update('sab\nhello world').digest('hex');
+  store.db.prepare('UPDATE events SET dedupe_key=? WHERE id=?').run(legacy, first.id);
+  expect(store.enqueue(input)).toEqual({ id: first.id, duplicate: true });
+  expect(store.enqueue({ ...input, receivedAt: '2026-08-23T07:00:00Z' }).duplicate).toBe(false);
 });

@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { DateTime } from 'luxon';
 import type {
   ActualAdapter,
@@ -12,25 +11,10 @@ import { EventStore, type StoredEvent } from './db.js';
 import { PARSER_REVISION, parseSms } from './parser.js';
 import { resolveAccount, resolveBillPaymentAccount, resolveTransferAccount } from './routing.js';
 import { MerchantResolver, merchantKey } from './merchant-resolver.js';
+import { importId, migrateImportIdentities } from './import-identity.js';
+import type { ActualTransaction } from './types.js';
 
 const retryMs = [60_000, 300_000, 1_800_000, 7_200_000];
-// Historical imports used the parsed SMS suffix. Keep that stable whenever a
-// source identifier was present, only falling back to the resolved account.
-const stableId = (tx: ParsedTransaction, accountKey: string, suffix = 'main') =>
-  'sms:' +
-  createHash('sha256')
-    .update(
-      [
-        tx.bank,
-        tx.accountAlias ?? accountKey,
-        tx.kind,
-        tx.occurredAt,
-        tx.amountCents,
-        tx.payee,
-        suffix,
-      ].join('|'),
-    )
-    .digest('hex');
 export class Processor {
   private timer?: NodeJS.Timeout;
   private running = false;
@@ -44,6 +28,7 @@ export class Processor {
     private minConfidence = 0.7,
     merchantResolver?: MerchantResolver,
   ) {
+    migrateImportIdentities(store, config);
     this.merchantResolver =
       merchantResolver ?? new MerchantResolver(store, actual, config, minConfidence);
   }
@@ -82,6 +67,11 @@ export class Processor {
     } finally {
       this.running = false;
     }
+  }
+  private async importTransactions(accountId: string, transactions: ActualTransaction[]) {
+    const result = await this.actual.importTransactions(accountId, transactions);
+    if (result.errors.length) throw new Error(result.errors.map(error => error.message).join('; '));
+    return result;
   }
   private async process(event: StoredEvent) {
     const input = JSON.parse(event.payload!) as SmsInput;
@@ -194,7 +184,7 @@ export class Processor {
         kind: tx.kind,
       });
     }
-    const date = DateTime.fromISO(tx.occurredAt).toISODate()!;
+    const date = DateTime.fromISO(tx.occurredAt, { zone: 'Asia/Riyadh' }).toISODate()!;
     const notes = [
       tx.note,
       tx.foreign ? `${tx.foreign.amount} ${tx.foreign.currency}` : '',
@@ -202,6 +192,7 @@ export class Processor {
     ]
       .filter(Boolean)
       .join(' | ');
+    const id = (part = 'main') => importId(this.store, event, tx, account.key, part);
     if (isTransfer) {
       const counterpart = this.store
         .findTransferCounterparts(
@@ -227,6 +218,13 @@ export class Processor {
           if (priorTarget && priorTarget.key !== account.key) return false;
           return currentTarget !== undefined || priorTarget !== undefined;
         });
+      if (
+        counterpart &&
+        !['imported', 'imported_review'].includes(this.store.get(counterpart.event_id)!.status)
+      )
+        throw new Error(
+          'Transfer counterpart has not completed; retrying after its import and sync',
+        );
       const counterpartTx = counterpart
         ? (JSON.parse(this.store.get(counterpart.event_id)!.parsed!) as ParsedTransaction)
         : undefined;
@@ -263,26 +261,6 @@ export class Processor {
         const payee = await this.actual.transferPayee(target.id);
         const principal =
           tx.principalCents ?? (tx.amountCents < 0 ? tx.amountCents + tx.feeCents : tx.amountCents);
-        await this.actual.importTransactions(account.id, [
-          {
-            date,
-            amount: principal,
-            payee,
-            notes,
-            imported_id: stableId(tx, account.key, 'principal'),
-          },
-        ]);
-        if (tx.feeCents)
-          await this.actual.importTransactions(account.id, [
-            {
-              date,
-              amount: -tx.feeCents,
-              payee_name: 'Bank Fees',
-              category: this.config.bankFeesCategoryId,
-              notes,
-              imported_id: stableId(tx, account.key, 'fee'),
-            },
-          ]);
         this.store.recordTransfer(
           event.id,
           account.key,
@@ -290,16 +268,27 @@ export class Processor {
           principal,
           tx.occurredAt,
         );
-      } else {
-        await this.actual.importTransactions(account.id, [
+        await this.importTransactions(account.id, [
           {
             date,
-            amount: tx.amountCents,
-            payee_name: tx.payee,
+            amount: principal,
+            payee,
             notes,
-            imported_id: stableId(tx, account.key),
+            imported_id: id('principal'),
           },
         ]);
+        if (tx.feeCents)
+          await this.importTransactions(account.id, [
+            {
+              date,
+              amount: -tx.feeCents,
+              payee_name: 'Bank Fees',
+              category: this.config.bankFeesCategoryId,
+              notes,
+              imported_id: id('fee'),
+            },
+          ]);
+      } else {
         this.store.recordTransfer(
           event.id,
           account.key,
@@ -308,9 +297,18 @@ export class Processor {
           tx.occurredAt,
           counterpart?.event_id,
         );
+        await this.importTransactions(account.id, [
+          {
+            date,
+            amount: tx.amountCents,
+            payee_name: tx.payee,
+            notes,
+            imported_id: id(),
+          },
+        ]);
       }
     } else {
-      const imported = await this.actual.importTransactions(account.id, [
+      const imported = await this.importTransactions(account.id, [
         {
           date,
           amount: tx.amountCents,
@@ -318,11 +316,9 @@ export class Processor {
           imported_payee: tx.payee,
           category: selectedCategory,
           notes,
-          imported_id: stableId(tx, account.key),
+          imported_id: id(),
         },
       ]);
-      if (imported.errors.length)
-        throw new Error(imported.errors.map(error => error.message).join('; '));
       const actualTransactionId = imported.added[0] ?? imported.updated[0];
       if (actualTransactionId) this.store.update(event.id, 'processing', { actualTransactionId });
     }

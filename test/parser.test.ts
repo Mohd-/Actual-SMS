@@ -9,7 +9,7 @@ describe('SMS parser fixture corpus', () => {
   });
 
   it('tracks the parser release represented by the corpus', () => {
-    expect(PARSER_REVISION).toBe(15);
+    expect(PARSER_REVISION).toBe(16);
   });
 });
 
@@ -42,4 +42,38 @@ describe('routing identifier regressions', () => {
       ),
     ).toMatchObject({ type: 'transaction', transaction: { transferCounterpartyAlias: '7404' } });
   });
+});
+
+describe('merchant text is not a notification marker', () => {
+  it.each(['FOOTPRINT', 'ATMOSPHERE', 'Reversal Coffee', 'Login Lounge', 'Insufficient Cafe'])(
+    'imports a purchase at %s as a debit',
+    merchant => {
+      expect(
+        parseSms(
+          `Purchase Card **1234 Amount SAR 25 at ${merchant} on 2026-08-22 10:05`,
+          '2026-08-22T10:10:30Z',
+          banks,
+          'SAB',
+          parsing,
+        ),
+      ).toMatchObject({
+        type: 'transaction',
+        transaction: { kind: 'purchase', amountCents: -2500, payee: merchant },
+      });
+    },
+  );
+  it.each(['OTP 1234 for purchase', 'Purchase declined due to insufficient funds'])(
+    'still ignores a real %s notification mentioning a merchant',
+    prefix => {
+      expect(
+        parseSms(
+          `${prefix} at Reversal Coffee on 2026-08-22 10:05`,
+          '2026-08-22T10:10:30Z',
+          banks,
+          'SAB',
+          parsing,
+        ).type,
+      ).toBe('ignored');
+    },
+  );
 });

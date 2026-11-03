@@ -8,7 +8,7 @@ import { reportActualCompatibility } from './actual-version.js';
 import { NoopEnricher, OpenCodeGoEnricher } from './enricher.js';
 import { Processor } from './processor.js';
 import { buildServer } from './server.js';
-import type { ResolvedAccount, ResolvedConfig } from './types.js';
+import { resolveConfig } from './resolve-config.js';
 
 const env = loadEnv();
 await Promise.all([
@@ -31,28 +31,7 @@ try {
   await actual.initialize();
   await reportActualCompatibility(actual);
   const [accounts, categories] = await Promise.all([actual.accounts(), actual.categories()]);
-  const resolvedAccounts: ResolvedAccount[] = [];
-  for (const mapping of file.accounts) {
-    const matches = accounts.filter(a => a.name === mapping.actualName);
-    if (matches.length !== 1)
-      throw new Error(`Actual account must resolve exactly once: ${mapping.actualName}`);
-    resolvedAccounts.push({ key: matches[0]!.id, ...matches[0]!, match: mapping.match });
-  }
-  const fee = categories.filter(c => c.name === file.bankFeesCategory);
-  if (fee.length !== 1)
-    throw new Error(`Bank Fees category must resolve exactly once: ${file.bankFeesCategory}`);
-  const eligible = file.eligibleCategories?.length
-    ? categories.filter(c => file.eligibleCategories!.includes(c.name))
-    : categories.filter(c => c.name !== file.bankFeesCategory);
-  if (file.eligibleCategories?.some(name => !eligible.some(c => c.name === name)))
-    throw new Error('One or more eligible category names do not exist');
-  const config: ResolvedConfig = {
-    banks,
-    parsing,
-    accounts: resolvedAccounts,
-    bankFeesCategoryId: fee[0]!.id,
-    eligibleCategories: eligible.map(({ id, name }) => ({ id, name })),
-  };
+  const config = resolveConfig(file, banks, parsing, accounts, categories);
   const ai = env.OPENCODE_GO_API_KEY
     ? new OpenCodeGoEnricher(env.OPENCODE_GO_API_KEY, env.OPENCODE_GO_MODEL)
     : new NoopEnricher();
