@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import YAML from 'yaml';
 import { z } from 'zod';
-import type { AppConfigFile } from './types.js';
+import type { AppConfigFile, BankConfig } from './types.js';
 
 const envSchema = z.object({
   API_KEY: z.string().min(16),
@@ -12,6 +12,7 @@ const envSchema = z.object({
   OPENCODE_GO_API_KEY: z.string().optional(),
   OPENCODE_GO_MODEL: z.string().default('deepseek-v4-flash'),
   CONFIG_PATH: z.string().default('/config/accounts.yaml'),
+  BANKS_CONFIG_PATH: z.string().default('/config/banks.yaml'),
   DB_PATH: z.string().default('/data/events.sqlite'),
   ACTUAL_CACHE_DIR: z.string().default('/actual-cache'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
@@ -27,7 +28,7 @@ const fileSchema = z.object({
         actualName: z.string().min(1),
         match: z
           .object({
-            bank: z.enum(['sab', 'alrajhi']),
+            bank: z.string().regex(/^[a-z][a-z0-9_-]*$/),
             accountSuffixes: z
               .array(z.string().regex(/^\d{3,6}$/))
               .min(1)
@@ -95,8 +96,62 @@ export function validateAccountRules(accounts: AppConfigFile['accounts']) {
     }
   }
 }
-export async function loadConfigFile(path: string): Promise<AppConfigFile> {
+const bankFileSchema = z
+  .object({
+    banks: z
+      .array(
+        z
+          .object({
+            id: z.string().regex(/^[a-z][a-z0-9_-]*$/),
+            name: z.string().trim().min(1),
+            senders: z.array(z.string().trim().min(1).max(100)).min(1),
+            messageAliases: z.array(z.string().trim().min(1)).default([]),
+            disposition: z.enum(['import', 'needs_review']).default('import'),
+          })
+          .strict(),
+      )
+      .min(1),
+  })
+  .strict();
+
+export function normalizeSender(value: string): string {
+  return value.replace(/\s+/gu, ' ').trim().toLowerCase();
+}
+
+export function parseBankConfig(value: unknown): BankConfig[] {
+  const { banks } = bankFileSchema.parse(value);
+  const ids = new Set<string>();
+  const senders = new Map<string, string>();
+  const messageAliases = new Map<string, string>();
+  for (const bank of banks) {
+    if (ids.has(bank.id)) throw new Error(`Duplicate bank ID: ${bank.id}`);
+    ids.add(bank.id);
+    for (const [aliases, seen, label] of [
+      [bank.senders, senders, 'sender alias'],
+      [bank.messageAliases, messageAliases, 'message alias'],
+    ] as const) {
+      for (const alias of aliases) {
+        const normalized = normalizeSender(alias);
+        if (seen.has(normalized))
+          throw new Error(`Duplicate ${label}: ${alias} (${seen.get(normalized)}, ${bank.id})`);
+        seen.set(normalized, bank.id);
+      }
+    }
+  }
+  return banks;
+}
+
+export async function loadBankConfigFile(path: string): Promise<BankConfig[]> {
+  return parseBankConfig(YAML.parse(await readFile(path, 'utf8')));
+}
+
+export async function loadConfigFile(path: string, banks: BankConfig[]): Promise<AppConfigFile> {
   const config = fileSchema.parse(YAML.parse(await readFile(path, 'utf8')));
+  for (const account of config.accounts) {
+    const bank = banks.find(bank => bank.id === account.match.bank);
+    if (!bank) throw new Error(`Unknown bank ID: ${account.match.bank}`);
+    if (bank.disposition !== 'import') throw new Error(`Account uses review-only bank: ${bank.id}`);
+  }
   validateAccountRules(config.accounts);
   return config;
 }

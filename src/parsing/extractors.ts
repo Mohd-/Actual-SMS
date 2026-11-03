@@ -5,6 +5,7 @@ import {
   dateValue,
   fieldDelimiter,
   foreignAmountPattern,
+  foreignCurrency,
   isoDatePattern,
   labelledFieldStops,
   merchantPatterns,
@@ -39,21 +40,38 @@ export function extractAmount(text: string, labels: readonly string[]): number |
   for (const label of labels) {
     const guardedLabel =
       label === 'amount'
-        ? '(?<!total\\s)(?<!due\\s)(?<!purchase\\s)(?<!transfer\\s)amount'
-        : label === 'مبلغ'
-          ? '(?<![\\p{L}])مبلغ'
-          : label === 'المبلغ'
-            ? '(?<!اجمالي\\s)المبلغ'
-            : label;
+        ? '(?<!total\\s)(?<!due\\s)(?<!purchase\\s)(?<!transfer\\s)amount(?:\\s+of)?'
+        : label === 'amount in (?:SAR|SR)'
+          ? `(?<!total\\s)${label}`
+          : label === 'مبلغ'
+            ? '(?<![\\p{L}])مبلغ'
+            : label === 'المبلغ'
+              ? '(?<!اجمالي\\s)المبلغ'
+              : label;
     const value = capture(text, [
       new RegExp(
-        `${guardedLabel}\\s*[:：]?\\s*(?:SAR|SR|ر\\.?س\\.?)?\\s*([\\d,.٠-٩]+)(?![\\d,.٠-٩])(?!(?:\\s*(?:USD|EUR|GBP|AED|KWD|BHD|QAR)\\b))`,
+        `${guardedLabel}\\s*[:：]?\\s*(?:\\(\\d+\\)\\s*)?(?:SAR|SR|ر\\.?س\\.?)?\\s*([\\d,.٠-٩]+)(?![\\d,.٠-٩])(?!(?:\\s*${foreignCurrency}\\b))`,
         'iu',
       ),
       new RegExp(`(?:SAR|SR|ر\\.?س\\.?)\\s*([\\d,.٠-٩]+)\\s*${guardedLabel}`, 'iu'),
     ]);
     if (value) return money(value);
   }
+}
+
+/** SAR equivalent shown in parentheses immediately after a foreign amount. */
+export function extractSarEquivalent(text: string): number | undefined {
+  const value = capture(text, [
+    new RegExp(
+      `(?:${foreignCurrency}\\s*[\\d,.]+|[\\d,.]+\\s*${foreignCurrency})\\s*\\(\\s*(?:SAR|SR)\\s*([\\d,.]+)\\s*\\)`,
+      'iu',
+    ),
+    new RegExp(
+      `(?:${foreignCurrency}\\s*[\\d,.]+|[\\d,.]+\\s*${foreignCurrency})\\s*\\(\\s*([\\d,.]+)\\s*(?:SAR|SR)\\s*\\)`,
+      'iu',
+    ),
+  ]);
+  return money(value);
 }
 
 export function extractAccountAlias(text: string): string | undefined {
@@ -79,7 +97,7 @@ export function extractLabelledValue(text: string, labels: string): string | und
 
 export function extractNumericReference(value?: string): string | undefined {
   if (!value) return;
-  const digits = [...normalizeText(value).matchAll(/\d{3,}/g)].at(-1)?.[0];
+  const digits = normalizeText(value).match(/\d{3,}/u)?.[0];
   if (!digits) return;
   return digits.length <= 6 ? digits : digits.slice(-4);
 }

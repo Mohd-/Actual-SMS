@@ -1,3 +1,4 @@
+import { banks } from './fixtures/banks.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { EventStore } from '../src/db.js';
@@ -14,6 +15,7 @@ afterEach(() => {
 function buildApp(store: EventStore) {
   return buildServer({
     apiKey: 'secret',
+    banks,
     store,
     processor: { tick: async () => {} } as Processor,
     ready: () => true,
@@ -178,6 +180,7 @@ describe('inbox sync API', () => {
       },
       { rowId: 12, date: checkpoint.date + 3, sender: null, message: null },
       { rowId: 13, date: checkpoint.date + 4, sender: 'STC Bank', message: 'review payload' },
+      { rowId: 14, date: checkpoint.date + 5, sender: 'D360 Bank', message: 'D360 payload' },
     ];
     const response = await app.inject({
       method: 'POST',
@@ -189,18 +192,85 @@ describe('inbox sync API', () => {
 
     expect(response.statusCode).toBe(202);
     expect(response.json()).toMatchObject({
-      checkpoint: { date: rows[3]!.date, rowId: 13 },
+      checkpoint: { date: rows[4]!.date, rowId: 14 },
       results: [
         { rowId: 10, outcome: 'queued', eventId: `inbox-v2-${rows[0]!.date}-10` },
         { rowId: 11, outcome: 'unsupported' },
         { rowId: 12, outcome: 'empty' },
         { rowId: 13, outcome: 'queued', eventId: `inbox-v2-${rows[3]!.date}-13` },
+        { rowId: 14, outcome: 'queued', eventId: `inbox-v2-${rows[4]!.date}-14` },
       ],
     });
-    expect(store.list({ limit: 20 })).toHaveLength(2);
+    expect(store.list({ limit: 20 })).toHaveLength(3);
     expect(JSON.stringify(store.db.prepare('SELECT payload FROM events').all())).not.toContain(
       'private unsupported payload',
     );
+  });
+
+  it('normalizes raw Tasker inbox identifier fields on the server', async () => {
+    const store = new EventStore(':memory:');
+    stores.push(store);
+    const app = buildApp(store);
+    const checkpoint = store.startInboxSync(1_000_000_000);
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/inbox-sync/batch',
+      headers: { 'x-api-key': 'secret' },
+      payload: {
+        checkpoint,
+        rows: [{ rowId: ' 42 ', date: String(checkpoint.date + 1), sender: null, message: null }],
+      },
+    });
+    await app.close();
+    expect(response.statusCode).toBe(202);
+    expect(response.json().checkpoint).toEqual({ date: checkpoint.date + 1, rowId: 42 });
+  });
+
+  it('recovers unsplit comma-separated Tasker rows without losing SMS commas or newlines', async () => {
+    const store = new EventStore(':memory:');
+    stores.push(store);
+    const app = buildApp(store);
+    const checkpoint = store.startInboxSync(1_000_000_000);
+    const date = checkpoint.date + 1;
+    const message =
+      'International POS Purchase\nAmount: JPY 1,878.00 (SAR 44.70)\nAt: EXAMPLE, STORE';
+    const raw = `42,D360 Bank,${message},${date}`;
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/inbox-sync/batch',
+      headers: { 'x-api-key': 'secret' },
+      payload: { checkpoint, rows: [{ rowId: raw, date: raw, sender: null, message: null }] },
+    });
+    expect(response.statusCode).toBe(202);
+    expect(response.json()).toMatchObject({
+      checkpoint: { date, rowId: 42 },
+      results: [{ rowId: 42, outcome: 'queued' }],
+    });
+    expect(JSON.parse(store.get(`inbox-v2-${date}-42`)!.payload!)).toMatchObject({
+      sender: 'D360 Bank',
+      message,
+      receivedAt: new Date(date).toISOString(),
+    });
+    await app.close();
+  });
+
+  it('rejects malformed Tasker rows without advancing the checkpoint or enqueueing partial SMS', async () => {
+    const store = new EventStore(':memory:');
+    stores.push(store);
+    const app = buildApp(store);
+    const checkpoint = store.startInboxSync(1_000_000_000);
+    for (const raw of ['42,D360 Bank,message,invalid-date', '42,D360 Bank,no-date']) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/inbox-sync/batch',
+        headers: { 'x-api-key': 'secret' },
+        payload: { checkpoint, rows: [{ rowId: raw, date: raw, sender: null, message: null }] },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(store.inboxCheckpoint()).toEqual(checkpoint);
+      expect(store.list({ limit: 20 })).toHaveLength(0);
+    }
+    await app.close();
   });
 
   it('deduplicates legacy inbox IDs and rejects stale or unordered batches', async () => {
@@ -261,7 +331,7 @@ describe('inbox sync API', () => {
     expect(unordered.json()).toMatchObject({ error: 'invalid_row_order', index: 1 });
   });
 
-  it('rewinds only backward and requires authentication', async () => {
+  it('rewinds only backward, is idempotent, and requires authentication', async () => {
     const store = new EventStore(':memory:');
     stores.push(store);
     const app = buildApp(store);
@@ -282,7 +352,10 @@ describe('inbox sync API', () => {
       payload: { date: checkpoint.date - 1000 },
     });
     expect(rewind.statusCode).toBe(200);
-    expect(rewind.json().checkpoint).toEqual({ date: checkpoint.date - 1000, rowId: 0 });
+    expect(rewind.json()).toEqual({
+      checkpoint: { date: checkpoint.date - 1000, rowId: 0 },
+      changed: true,
+    });
 
     const forward = await app.inject({
       method: 'POST',
@@ -291,12 +364,16 @@ describe('inbox sync API', () => {
       payload: { date: checkpoint.date },
     });
     await app.close();
-    expect(forward.statusCode).toBe(409);
+    expect(forward.statusCode).toBe(200);
+    expect(forward.json()).toEqual({
+      checkpoint: { date: checkpoint.date - 1000, rowId: 0 },
+      changed: false,
+    });
     expect(store.inboxCheckpoint()).toEqual({ date: checkpoint.date - 1000, rowId: 0 });
   });
 });
 
-describe('Tasker projects', () => {
+describe('Tasker inbox project', () => {
   const readProject = (name: string) =>
     readFileSync(new URL(`../tasker/${name}`, import.meta.url), 'utf8');
 
@@ -307,18 +384,13 @@ describe('Tasker projects', () => {
     expect(project).toContain('%ActualSmsServiceUrl/v1/inbox-sync/rewind');
     expect(project).not.toContain('address IN');
     expect(project).not.toContain('ActualSmsInboxV2');
+    expect(project).not.toContain('invalid row identifier');
   });
 
   it('configures the service URL at import time without fixed deployment hosts', () => {
-    const projects = [
-      readProject('Actual_SMS_Inbox.prj.xml'),
-      readProject('Actual_SMS_To_Budget.prj.xml'),
-    ];
-    for (const project of projects) {
-      expect(project).toContain('<pvn>%ActualSmsServiceUrl</pvn>');
-      expect(project).not.toMatch(/https:\/\/[^<]+\/v1\//u);
-    }
-    expect(projects[1]).toContain('%ActualSmsServiceUrl/v1/sms');
+    const project = readProject('Actual_SMS_Inbox.prj.xml');
+    expect(project).toContain('<pvn>%ActualSmsServiceUrl</pvn>');
+    expect(project).not.toMatch(/https:\/\/[^<]+\/v1\//u);
   });
 });
 
@@ -334,6 +406,7 @@ describe('event API', () => {
     store.update(id, 'needs_review', { parserReason: 'unrecognized_template' });
     const app = buildServer({
       apiKey: 'secret',
+      banks,
       store,
       processor: { tick: async () => {} } as Processor,
       ready: () => true,
@@ -369,6 +442,7 @@ describe('event API', () => {
     });
     const app = buildServer({
       apiKey: 'secret',
+      banks,
       store,
       processor: { tick: async () => {} } as Processor,
       ready: () => true,

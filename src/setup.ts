@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import YAML from 'yaml';
 import { loadActualApi } from './actual-sdk.js';
-import { validateAccountRules } from './config.js';
+import { loadBankConfigFile, validateAccountRules } from './config.js';
 import type { AppConfigFile } from './types.js';
 
 type Choice = { name: string };
@@ -152,11 +152,19 @@ async function main() {
       }
     }
 
+    const banks = await loadBankConfigFile(
+      process.env.BANKS_CONFIG_PATH || resolve('config/banks.yaml'),
+    );
+    const importBanks = banks.filter(bank => bank.disposition === 'import');
+    if (!importBanks.length)
+      throw new Error('Configure at least one import bank in config/banks.yaml');
+
     const serverURL = await required('Actual server URL', 'http://localhost:5006');
     new URL(serverURL);
     const serverVersion = await verifyActualServer(serverURL);
     console.log(`Connected to Actual sync server ${serverVersion}.`);
     const password = await secret('Actual server password');
+    console.log('Find the Sync ID in Actual: Settings → Show advanced settings → Sync ID.');
     const syncId = await required('Budget Sync ID');
     const encryptionPassword = await secret('Budget encryption password (blank if none)', true);
     cacheDir = await mkdtemp(join(tmpdir(), 'actual-sms-setup-'));
@@ -178,11 +186,9 @@ async function main() {
         'Choose an account that receives bank SMS transactions:',
         accounts,
       );
-      const bank = await choose('Choose the bank that sends these SMS messages:', [
-        { name: 'SAB' },
-        { name: 'Al Rajhi' },
-      ]);
-      const bankId = bank.name === 'SAB' ? 'sab' : 'alrajhi';
+      const bankChoices = importBanks.map(bank => ({ name: `${bank.name} (${bank.id})` }));
+      const bank = await choose('Choose the bank that sends these SMS messages:', bankChoices);
+      const bankId = importBanks[bankChoices.indexOf(bank)]!.id;
       const method = await choose('Choose how this account is identified in its SMS messages:', [
         { name: 'Account/card suffix' },
         { name: 'Transaction type' },
@@ -248,6 +254,7 @@ async function main() {
       OPENCODE_GO_API_KEY: openCodeKey,
       OPENCODE_GO_MODEL: 'deepseek-v4-flash',
       CONFIG_PATH: '/config/accounts.yaml',
+      BANKS_CONFIG_PATH: '/config/banks.yaml',
       DB_PATH: '/data/events.sqlite',
       ACTUAL_CACHE_DIR: '/actual-cache',
       PORT: '3000',
@@ -272,6 +279,8 @@ async function main() {
     console.log(`Wrote ${configPath}`);
     console.log(`Tasker API key: ${apiKey}`);
     console.log('Next: docker compose -f compose.example.yaml up --build -d');
+    console.log('Then import tasker/Actual_SMS_Inbox.prj.xml and enter your HTTPS service URL');
+    console.log('and the Tasker API key above. See README for permissions and a connection check.');
   } finally {
     rl.close();
     if (initialized) await (await loadActualApi()).shutdown().catch(() => {});

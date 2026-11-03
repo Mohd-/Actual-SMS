@@ -115,7 +115,7 @@ setLocal("%syncid", String(checkpointId));</Str>
 			<Str sr="arg4" ve="3">((date &gt; %syncdate) OR (date = %syncdate AND _id &gt; %syncid))</Str>
 			<Str sr="arg5" ve="3"/>
 			<Str sr="arg6" ve="3">date ASC, _id ASC LIMIT 25</Str>
-			<Str sr="arg7" ve="3">&#9;</Str>
+			<Str sr="arg7" ve="3">|~sms~|</Str>
 			<Str sr="arg8" ve="3">%inboxrows</Str>
 			<Int sr="arg9" val="0"/>
 			<Int sr="arg10" val="0"/>
@@ -125,8 +125,6 @@ setLocal("%syncid", String(checkpointId));</Str>
 			<Str sr="arg0" ve="3">setLocal("%payload", "");
 setLocal("%inboxcount", "");
 setLocal("%inboxrowcount", "");
-setLocal("%inboxlastdate", "");
-setLocal("%inboxlastid", "");
 setLocal("%drainmore", "");
 setLocal("%http_response_code", "");
 setLocal("%http_data", "");
@@ -135,27 +133,16 @@ var rows = typeof inboxrows !== "undefined" &amp;&amp; inboxrows ? inboxrows : [
 if (!Array.isArray(rows)) rows = [rows];
 if (rows.length === 0) exit();
 var events = [];
-var lastDate = 0;
-var lastId = 0;
 for (var i = 0; i &lt; rows.length; i++) {
-  var parts = String(rows[i]).split("\t");
-  var dateMs = Number(parts[parts.length - 1]);
-  var rowId = Number(parts[0]);
+  var parts = String(rows[i]).split("|~sms~|");
+  var rowId = parts.length &gt; 0 ? String(parts[0]) : "";
+  var dateMs = parts.length &gt; 0 ? String(parts[parts.length - 1]) : "";
   var sender = parts.length &gt;= 2 &amp;&amp; parts[1] ? String(parts[1]) : null;
-  var body = parts.length &gt;= 4 ? parts.slice(2, parts.length - 1).join("\t") : null;
-  if (parts.length &lt; 4 || !isFinite(dateMs) || dateMs &lt;= 0 || Math.floor(dateMs) !== dateMs ||
-      !isFinite(rowId) || rowId &lt; 0 || Math.floor(rowId) !== rowId) {
-    flashLong("Actual SMS inbox returned an invalid row identifier; server checkpoint unchanged");
-    exit();
-  }
-  lastDate = dateMs;
-  lastId = rowId;
+  var body = parts.length &gt;= 4 ? parts.slice(2, parts.length - 1).join("|~sms~|") : null;
   events.push({ rowId: rowId, date: dateMs, sender: sender, message: body });
 }
 var expected = { date: Number(syncdate), rowId: Number(syncid) };
 setLocal("%payload", JSON.stringify({ checkpoint: expected, rows: events }));
-setLocal("%inboxlastdate", String(lastDate));
-setLocal("%inboxlastid", String(lastId));
 setLocal("%inboxcount", String(events.length));
 setLocal("%inboxrowcount", String(rows.length));</Str>
 			<Str sr="arg1" ve="3"/>
@@ -198,8 +185,10 @@ try {
 var acknowledged = response &amp;&amp; response.checkpoint;
 var validResponse = code === "202" &amp;&amp; response &amp;&amp; Array.isArray(response.results) &amp;&amp;
   response.results.length === Number(inboxcount) &amp;&amp; acknowledged &amp;&amp;
-  Number(acknowledged.date) === Number(inboxlastdate) &amp;&amp;
-  Number(acknowledged.rowId) === Number(inboxlastid);
+  isFinite(Number(acknowledged.date)) &amp;&amp; Number(acknowledged.date) &gt;= 0 &amp;&amp;
+  Math.floor(Number(acknowledged.date)) === Number(acknowledged.date) &amp;&amp;
+  isFinite(Number(acknowledged.rowId)) &amp;&amp; Number(acknowledged.rowId) &gt;= 0 &amp;&amp;
+  Math.floor(Number(acknowledged.rowId)) === Number(acknowledged.rowId);
 if (!validResponse) {
   var detail = typeof errmsg !== "undefined" &amp;&amp; errmsg ? errmsg :
     (typeof http_data !== "undefined" &amp;&amp; http_data ? http_data : "No response");
@@ -275,8 +264,18 @@ X-API-Key:%ActualSmsApiKey</Str>
 		<Action sr="act2" ve="7">
 			<code>129</code>
 			<Str sr="arg0" ve="3">var code = typeof http_response_code === "undefined" ? "" : String(http_response_code);
-if (code === "200") {
-  flashLong("Actual SMS inbox checkpoint rewound seven days; the next sync will reconcile it");
+var response;
+try {
+  response = JSON.parse(String(http_data));
+} catch (_error) {
+  response = null;
+}
+if (code === "200" &amp;&amp; response &amp;&amp; response.checkpoint) {
+  if (response.changed === false) {
+    flashLong("Actual SMS inbox was already at least seven days back; the next sync will reconcile it");
+  } else {
+    flashLong("Actual SMS inbox checkpoint rewound seven days; the next sync will reconcile it");
+  }
 } else {
   var detail = typeof errmsg !== "undefined" &amp;&amp; errmsg ? errmsg :
     (typeof http_data !== "undefined" &amp;&amp; http_data ? http_data : "No response");

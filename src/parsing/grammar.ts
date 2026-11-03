@@ -26,15 +26,25 @@ export const ignoredNotificationRules: readonly PatternRule<
 // such as "purchase" or "reversal" that can occur elsewhere in a message.
 export const transactionKindRules: readonly PatternRule<TxKind>[] = [
   {
+    // A statement-style "Credit card: Payment" notification reports money
+    // received by the card account, unlike an instruction to pay a card bill.
+    value: 'transfer_in',
+    patterns: [/\bcredit\s+card\s*[:-]\s*(?:payment|credited)\b/iu],
+  },
+  {
+    value: 'refund',
+    patterns: [/\bcashback\s+of\b/iu],
+  },
+  {
     value: 'card_payment',
     patterns: [
-      /(?:credit card.*(?:payment|transfer)|card payment|سداد بطاقة|تحويل.*بطاقة ائتمانية|سداد\s+فاتورة(?=[\s\S]*?بطاق[ةه]\s+\S*ئتماني))/iu,
+      /(?:credit card.*(?:payment|transfer)|card payment|بطاقة\s+[إائ]ئ?تمانية\s*[:：]\s*تسديد|سداد بطاقة|تحويل.*بطاقة ائتمانية|سداد\s+فاتورة(?=[\s\S]*?بطاق[ةه]\s+\S*ئتماني))/iu,
     ],
   },
   {
     value: 'transfer_in',
     patterns: [
-      /(?:incoming transfer|transfer received|local credit transfer|reverse(?:d)? transfer|(?:sarie\s*)?(?:transfer\s*)?(?:credited|credit)|حوالة واردة|حوالة راتب|تحويل وارد|تحويل ائتماني(?: محلي)?|حوالة ائتمانية|تم إيداع|حوالة.*(?:مضافة|معكوسة)|تحويل.*(?:مضاف|معكوس))/iu,
+      /(?:incoming transfer|transfer received|local credit transfer|reverse(?:d)? transfer|(?:sarie\s*)?(?:transfer\s*)?(?:credited|credit(?!\s+card\b))|(?:has\s+been\s+)?deposited(?:\s+into)?|حوالة واردة|حوالة راتب|تحويل وارد|تحويل ائتماني(?: محلي)?|حوالة ائتمانية|تم إيداع|حوالة.*(?:مضافة|معكوسة)|تحويل.*(?:مضاف|معكوس))/iu,
     ],
   },
   {
@@ -49,7 +59,7 @@ export const transactionKindRules: readonly PatternRule<TxKind>[] = [
   },
   {
     value: 'refund',
-    patterns: [/(?:refund|reversal|reversed|استرداد|عكس عملية)/iu],
+    patterns: [/(?:refund|reverse transaction|reversal|reversed|استرداد|عكس عملية)/iu],
   },
   {
     value: 'purchase',
@@ -60,7 +70,8 @@ export const transactionKindRules: readonly PatternRule<TxKind>[] = [
 ];
 
 export const accountAliasPatterns = [
-  /(?:account|acct|a\/c|حساب|الحساب|بطاقة|card)[^\d٠-٩]{0,12}(?:[*xX-]*)([\d٠-٩]{3,6})/iu,
+  /بطاقة\s+(?:الأول\s+)?مدى-?أثير\s*\(([\d٠-٩]{3,6})\)/iu,
+  /(?:account|acct|a\/c|حساب|الحساب|بطاقة|card|by)[^\d٠-٩]{0,12}(?:[*xX-]*)([\d٠-٩]{3,6})/iu,
   /(?:[*xX]){2,}([\d٠-٩]{3,6})/u,
 ] as const;
 
@@ -76,9 +87,33 @@ export const fieldLabels = {
 } as const;
 
 export const amountLabels = {
-  total: ['total due amount', 'total amount', 'المبلغ الإجمالي', 'اجمالي المبلغ'],
-  principal: ['amount', 'purchase amount', 'transfer amount', 'مبلغ العملية', 'المبلغ', 'مبلغ'],
-  fee: ['fees?\\s*(?:&|and)\\s*vat', 'fees?', 'fee', 'الرسوم\\s*(?:و|and)\\s*الضريبة', 'رسوم'],
+  total: [
+    'total due amount',
+    'total amount in (?:SAR|SR)',
+    'total amount',
+    'المبلغ الإجمالي',
+    'اجمالي المبلغ',
+  ],
+  principal: [
+    'amount in (?:SAR|SR)',
+    'amount',
+    'credited with',
+    'cashback of',
+    'purchase amount',
+    'transfer amount',
+    'مبلغ العملية',
+    'المبلغ',
+    'بمبلغ',
+    'مبلغ',
+  ],
+  fee: [
+    'international fees in (?:SAR|SR)',
+    'fees?\\s*(?:&|and)\\s*vat',
+    'fees?',
+    'fee',
+    'الرسوم\\s*(?:و|and)\\s*الضريبة',
+    'رسوم',
+  ],
   balance: ['available balance', 'current balance', 'balance', 'الرصيد المتاح', 'الرصيد'],
 } as const;
 
@@ -90,8 +125,11 @@ export const labelledFieldStops =
 
 export const isoDatePattern = /(20\d\d[-/]\d{1,2}[-/]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?)/;
 export const slashDatePattern = /(\d{1,2}\/\d{1,2}\/\d{2,4}(?:\s+\d{1,2}:\d{2})?)/;
-export const foreignAmountPattern =
-  /(?:USD|EUR|GBP|AED|KWD|BHD|QAR)\s*([\d,.]+)|([\d,.]+)\s*(USD|EUR|GBP|AED|KWD|BHD|QAR)/i;
+export const foreignCurrency = '(?:USD|EUR|GBP|AED|KWD|BHD|QAR|JPY)';
+export const foreignAmountPattern = new RegExp(
+  `${foreignCurrency}\\s*([\\d,.]+)|([\\d,.]+)\\s*(${foreignCurrency})`,
+  'i',
+);
 export const merchantPatterns = [
-  /(?:merchant|\bat\b|entity|لدى|متجر|الجهة)\s*[:：]?\s*([^,;]+?)(?=\s+(?:on|date|amount|SAR|SR|(?:available|current)\s+balance|balance|في|بتاريخ|المبلغ|الرصيد(?:\s+المتاح)?|service|الخدمة)|$)/iu,
+  /(?:merchant|\bat\b|entity|لدى|متجر|الجهة)\s*[:：]?\s*([^,;]+?)(?=\s+(?:on|date|total\s+amount|amount|SAR|SR|for\s+(?:SAR|SR)|(?:available|current)\s+balance|balance|country|fees?\b|رصيد|في|بتاريخ|المبلغ|الرصيد(?:\s+المتاح)?|service|الخدمة)|$)/iu,
 ] as const;

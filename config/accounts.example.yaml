@@ -1,3 +1,4 @@
+# Bank IDs refer to entries in config/banks.yaml.
 accounts:
   - actualName: SAB Current Account
     match:
@@ -7,6 +8,10 @@ accounts:
     match:
       bank: sab
       accountSuffixes: ['5202', '202']
+  - actualName: SAB SampleLedger4
+    match:
+      bank: sab
+      accountSuffixes: ['8601']
   - actualName: Al Rajhi Current Account
     match:
       bank: alrajhi
@@ -18,6 +23,15 @@ accounts:
       hasBalance: true
       transferIdentifiers: ['6303']
       billPaymentIdentifiers: ['404']
+  - actualName: Wadaie
+    match:
+      bank: wadaie
+      transactionKinds: [transfer_in, transfer_out]
+# Add this route after confirming the exact existing Actual account name:
+#  - actualName: D360 Account
+#    match:
+#      bank: d360
+#      accountSuffixes: ['8110']
 bankFeesCategory: Bank Fees
 eligibleCategories:
   - Groceries

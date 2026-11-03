@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import { z } from 'zod';
 import { InboxCheckpointConflict, type EventStore } from './db.js';
+import type { BankConfig } from './types.js';
 import type { Processor } from './processor.js';
 import { resolveSmsSource } from './sms-source.js';
 
@@ -22,14 +23,50 @@ const batchSchema = z.object({ events: smsInputSchema.strict().array().min(1).ma
 const checkpointSchema = z
   .object({ date: z.number().int().min(0), rowId: z.number().int().min(0) })
   .strict();
-const inboxRowSchema = z
-  .object({
-    rowId: z.number().int().min(0),
-    date: z.number().int().positive().max(8_640_000_000_000_000),
-    sender: z.string().max(100).nullable(),
-    message: z.string().max(20_000).nullable(),
-  })
-  .strict();
+const inboxIntegerSchema = z
+  .union([z.number(), z.string().trim().regex(/^\d+$/)])
+  .transform(value => (typeof value === 'number' ? value : Number(value)))
+  .pipe(z.number().int());
+// Older Tasker imports lose the tab divider and return comma-separated rows.
+// Their JavaScript then sends the same unsplit row as both numeric fields.
+// Recover only that exact shape; the first two and final commas bound the
+// columns, preserving commas and newlines inside the SMS body.
+function normalizeTaskerRow(value: unknown): unknown {
+  if (!value || typeof value !== 'object') return value;
+  const row = value as Record<string, unknown>;
+  if (
+    typeof row.rowId !== 'string' ||
+    row.rowId !== row.date ||
+    row.sender !== null ||
+    row.message !== null
+  )
+    return value;
+  const raw = row.rowId;
+  const first = raw.indexOf(',');
+  const second = raw.indexOf(',', first + 1);
+  const last = raw.lastIndexOf(',');
+  if (first < 0 || second < 0 || last <= second) return value;
+  return {
+    ...row,
+    rowId: raw.slice(0, first),
+    sender: raw.slice(first + 1, second).trim() || null,
+    message: raw.slice(second + 1, last),
+    date: raw.slice(last + 1),
+  };
+}
+const inboxRowSchema = z.preprocess(
+  normalizeTaskerRow,
+  z
+    .object({
+      // Tasker sends the content-provider fields verbatim. The server owns their
+      // normalization because it also owns the checkpoint they advance.
+      rowId: inboxIntegerSchema.pipe(z.number().min(0)),
+      date: inboxIntegerSchema.pipe(z.number().positive().max(8_640_000_000_000_000)),
+      sender: z.string().max(100).nullable(),
+      message: z.string().max(20_000).nullable(),
+    })
+    .strict(),
+);
 const inboxBatchSchema = z
   .object({ checkpoint: checkpointSchema, rows: inboxRowSchema.array().min(1).max(25) })
   .strict();
@@ -53,6 +90,7 @@ const listQuerySchema = z.object({
 });
 export function buildServer(options: {
   apiKey: string;
+  banks: BankConfig[];
   store: EventStore;
   processor: Processor;
   ready: () => boolean;
@@ -131,21 +169,51 @@ export function buildServer(options: {
     { bodyLimit: 5 * 1024 * 1024 },
     async (req, reply) => {
       const parsed = inboxBatchSchema.safeParse(req.body);
-      if (!parsed.success)
-        return reply.code(400).send({
-          error: 'invalid_request',
-          details: parsed.error.issues.map(i => ({ path: i.path.join('.'), message: i.message })),
-        });
+      if (!parsed.success) {
+        const details = parsed.error.issues.map(i => ({
+          path: i.path.join('.'),
+          message: i.message,
+        }));
+        const rows = (req.body as { rows?: unknown[] })?.rows;
+        const first = rows?.[0] as { rowId?: unknown; date?: unknown } | undefined;
+        const rowId = typeof first?.rowId === 'string' ? first.rowId : '';
+        req.log.warn(
+          {
+            details,
+            firstRowFormat: {
+              rowIdType: typeof first?.rowId,
+              dateType: typeof first?.date,
+              identicalFields: first?.rowId === first?.date,
+              rowIdLength: rowId.length,
+              tabs: rowId.split('\t').length - 1,
+              literalTabs: rowId.split('\\t').length - 1,
+              pipes: rowId.split('|').length - 1,
+              commas: rowId.split(',').length - 1,
+              newlines: rowId.split('\n').length - 1,
+            },
+          },
+          'Inbox sync batch validation failed',
+        );
+        return reply.code(400).send({ error: 'invalid_request', details });
+      }
       let previous = parsed.data.checkpoint;
       for (const [index, row] of parsed.data.rows.entries()) {
-        if (row.date < previous.date || (row.date === previous.date && row.rowId <= previous.rowId))
+        if (
+          row.date < previous.date ||
+          (row.date === previous.date && row.rowId <= previous.rowId)
+        ) {
+          req.log.warn(
+            { index, previous, row: { date: row.date, rowId: row.rowId } },
+            'Inbox sync batch row order invalid',
+          );
           return reply.code(400).send({ error: 'invalid_row_order', index });
+        }
         previous = { date: row.date, rowId: row.rowId };
       }
       const entries = parsed.data.rows.map(row => {
         const message = row.message?.trim();
         if (!message) return { row, skipped: 'empty' as const };
-        const source = resolveSmsSource(row.sender ?? '', message);
+        const source = resolveSmsSource(row.sender ?? '', message, options.banks);
         if (source.type === 'unsupported' && source.disposition === 'ignored')
           return { row, skipped: 'unsupported' as const };
         return {
@@ -179,11 +247,11 @@ export function buildServer(options: {
         details: parsed.error.issues.map(i => ({ path: i.path.join('.'), message: i.message })),
       });
     const result = options.store.rewindInboxSync(parsed.data.date);
-    if (!result.changed)
-      return reply
-        .code(409)
-        .send({ error: 'checkpoint_must_move_backward', checkpoint: result.checkpoint });
-    return { checkpoint: result.checkpoint };
+    // Reconciliation is intentionally idempotent. A previous reconciliation may
+    // already have moved the cursor farther back than this request's rolling
+    // seven-day boundary; reporting that as an error makes a safe replay look
+    // like a corrupted checkpoint.
+    return { checkpoint: result.checkpoint, changed: result.changed };
   });
   app.get<{ Querystring: Record<string, unknown> }>('/v1/events', async (req, reply) => {
     const query = listQuerySchema.safeParse(req.query);

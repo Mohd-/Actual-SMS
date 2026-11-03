@@ -10,6 +10,8 @@ import { fieldLabels, transactionKindRules } from '../src/parsing/grammar.js';
 describe('shared SMS grammar', () => {
   it('keeps transaction markers in semantic precedence order', () => {
     expect(transactionKindRules.map(rule => rule.value)).toEqual([
+      'transfer_in',
+      'refund',
       'card_payment',
       'transfer_in',
       'transfer_out',

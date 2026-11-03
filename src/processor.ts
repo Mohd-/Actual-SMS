@@ -85,7 +85,7 @@ export class Processor {
   }
   private async process(event: StoredEvent) {
     const input = JSON.parse(event.payload!) as SmsInput;
-    const result = parseSms(input.message, input.receivedAt, input.sender);
+    const result = parseSms(input.message, input.receivedAt, this.config.banks, input.sender);
     if (result.type === 'ignored' || result.type === 'needs_review') {
       this.store.recordEnrichment(event.id, 'not_applicable', {
         reason: result.type,
@@ -203,7 +203,17 @@ export class Processor {
         tx.principalCents ?? tx.amountCents,
         tx.occurredAt,
       );
-      if (counterpart) {
+      const counterpartTx = counterpart
+        ? (JSON.parse(this.store.get(counterpart.event_id)!.parsed!) as ParsedTransaction)
+        : undefined;
+      const counterpartTarget = counterpartTx
+        ? counterpartTx.billPaymentIdentifier
+          ? resolveBillPaymentAccount(this.config.accounts, counterpartTx.billPaymentIdentifier)
+          : counterpartTx.transferCounterpartyAlias
+            ? resolveTransferAccount(this.config.accounts, counterpartTx.transferCounterpartyAlias)
+            : undefined
+        : undefined;
+      if (counterpart && counterpartTarget) {
         this.store.recordTransfer(
           event.id,
           account.key,
@@ -215,11 +225,16 @@ export class Processor {
         this.store.update(event.id, 'imported');
         return;
       }
-      const target = tx.billPaymentIdentifier
-        ? resolveBillPaymentAccount(this.config.accounts, tx.billPaymentIdentifier)
-        : tx.transferCounterpartyAlias
-          ? resolveTransferAccount(this.config.accounts, tx.transferCounterpartyAlias)
-          : undefined;
+      // A counterpart already imported without a transfer payee covers only
+      // its own account. Import this side independently to avoid crediting
+      // that account again through Actual's linked transfer.
+      const target = counterpart
+        ? undefined
+        : tx.billPaymentIdentifier
+          ? resolveBillPaymentAccount(this.config.accounts, tx.billPaymentIdentifier)
+          : tx.transferCounterpartyAlias
+            ? resolveTransferAccount(this.config.accounts, tx.transferCounterpartyAlias)
+            : undefined;
       if (target) {
         const payee = await this.actual.transferPayee(target.id);
         const principal =
@@ -251,7 +266,7 @@ export class Processor {
           principal,
           tx.occurredAt,
         );
-      } else
+      } else {
         await this.actual.importTransactions(account.id, [
           {
             date,
@@ -261,6 +276,15 @@ export class Processor {
             imported_id: stableId(tx, account.key),
           },
         ]);
+        this.store.recordTransfer(
+          event.id,
+          account.key,
+          tx.transferCounterpartyAlias,
+          tx.principalCents ?? tx.amountCents,
+          tx.occurredAt,
+          counterpart?.event_id,
+        );
+      }
     } else {
       const imported = await this.actual.importTransactions(account.id, [
         {

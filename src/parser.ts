@@ -1,4 +1,4 @@
-import type { ParsedTransaction, TxKind } from './types.js';
+import type { BankConfig, ParsedTransaction, TxKind } from './types.js';
 import {
   amountLabels,
   fieldLabels,
@@ -17,6 +17,7 @@ import {
   extractLabelledValue,
   extractMerchant,
   extractNumericReference,
+  extractSarEquivalent,
   normalizeText,
 } from './parsing/extractors.js';
 import { resolveSmsSource } from './sms-source.js';
@@ -24,7 +25,7 @@ import { resolveSmsSource } from './sms-source.js';
 export { normalizeText } from './parsing/extractors.js';
 
 /** Increment when a parser release should re-evaluate retained parser outcomes. */
-export const PARSER_REVISION = 9;
+export const PARSER_REVISION = 14;
 
 export type ParserReason =
   | 'otp_or_login'
@@ -83,12 +84,17 @@ function accountReferences(text: string, kind: TxKind) {
   };
 }
 
-export function parseSms(raw: string, receivedAt: string, sender = ''): ParseResult {
+export function parseSms(
+  raw: string,
+  receivedAt: string,
+  banks: readonly BankConfig[],
+  sender = '',
+): ParseResult {
   const text = normalizeText(raw);
   const ignoredReason = classify(text, ignoredNotificationRules);
   if (ignoredReason) return { type: 'ignored', reason: ignoredReason };
 
-  const source = resolveSmsSource(sender, text);
+  const source = resolveSmsSource(sender, text, banks);
   if (source.type === 'unsupported')
     return { type: source.disposition, reason: 'unsupported_sender' };
   const { bank } = source;
@@ -99,7 +105,7 @@ export function parseSms(raw: string, receivedAt: string, sender = ''): ParseRes
   const biller = extractBiller(text);
   const references = accountReferences(text, kind);
   const total = extractAmount(text, amountLabels.total);
-  const principal = extractAmount(text, amountLabels.principal);
+  const principal = extractAmount(text, amountLabels.principal) ?? extractSarEquivalent(text);
   const fee = extractAmount(text, amountLabels.fee) ?? 0;
   const foreign = extractForeignAmount(text);
   const sar = total ?? (principal === undefined ? undefined : principal + fee);
@@ -121,9 +127,11 @@ export function parseSms(raw: string, receivedAt: string, sender = ''): ParseRes
     transferName ??
     (kind.includes('transfer') || kind === 'card_payment'
       ? 'Bank transfer'
-      : kind === 'withdrawal'
-        ? 'ATM withdrawal'
-        : 'Unknown merchant');
+      : kind === 'refund' && /\bcashback\s+of\b/iu.test(text)
+        ? 'Card cashback'
+        : kind === 'withdrawal'
+          ? 'ATM withdrawal'
+          : 'Unknown merchant');
   const balance = extractAmount(text, amountLabels.balance);
 
   return {

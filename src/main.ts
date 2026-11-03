@@ -1,6 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { loadConfigFile, loadEnv } from './config.js';
+import { loadBankConfigFile, loadConfigFile, loadEnv } from './config.js';
 import { EventStore } from './db.js';
 import { ActualApiAdapter } from './actual.js';
 import { reportActualCompatibility } from './actual-version.js';
@@ -14,7 +14,8 @@ await Promise.all([
   mkdir(dirname(env.DB_PATH), { recursive: true }),
   mkdir(env.ACTUAL_CACHE_DIR, { recursive: true }),
 ]);
-const file = await loadConfigFile(env.CONFIG_PATH);
+const banks = await loadBankConfigFile(env.BANKS_CONFIG_PATH);
+const file = await loadConfigFile(env.CONFIG_PATH, banks);
 const store = new EventStore(env.DB_PATH);
 const actual = new ActualApiAdapter({
   serverURL: env.ACTUAL_SERVER_URL,
@@ -44,6 +45,7 @@ try {
   if (file.eligibleCategories?.some(name => !eligible.some(c => c.name === name)))
     throw new Error('One or more eligible category names do not exist');
   const config: ResolvedConfig = {
+    banks,
     accounts: resolvedAccounts,
     bankFeesCategoryId: fee[0]!.id,
     eligibleCategories: eligible.map(({ id, name }) => ({ id, name })),
@@ -68,6 +70,7 @@ try {
   ready = true;
   const app = buildServer({
     apiKey: env.API_KEY,
+    banks,
     store,
     processor,
     ready: () => ready,

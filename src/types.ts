@@ -26,7 +26,15 @@ export interface InboxSyncRow {
 export type InboxSyncOutcome = 'queued' | 'duplicate' | 'unsupported' | 'empty';
 export type TxKind =
   'purchase' | 'refund' | 'withdrawal' | 'transfer_in' | 'transfer_out' | 'card_payment';
-export type Bank = 'sab' | 'alrajhi';
+export type Bank = string;
+export interface BankConfig {
+  id: Bank;
+  name: string;
+  senders: string[];
+  /** Legacy sender-optional messages only; never overrides a named sender. */
+  messageAliases: string[];
+  disposition: 'import' | 'needs_review';
+}
 
 export interface ParsedTransaction {
   bank: Bank;
@@ -64,6 +72,7 @@ export interface AppConfigFile {
   eligibleCategories?: string[];
 }
 export interface ResolvedConfig {
+  banks: BankConfig[];
   accounts: ResolvedAccount[];
   bankFeesCategoryId: string;
   eligibleCategories: { id: string; name: string }[];

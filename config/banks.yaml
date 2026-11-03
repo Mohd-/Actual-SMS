@@ -1,0 +1,23 @@
+# Sender aliases match the complete SMS sender, ignoring case and extra whitespace.
+# Keep IDs stable: account routes and transaction deduplication use them.
+banks:
+  - id: sab
+    name: SAB
+    senders: [SAB, Saudi Awwal, Saudi Awwal Bank, ساب, الأول]
+    messageAliases: [SAB, Saudi Awwal, ساب, الأول]
+  - id: alrajhi
+    name: Al Rajhi
+    senders: [AlRajhiBank, Al Rajhi, AlRajhi, الراجحي, بنك الراجحي]
+    messageAliases: [Al Rajhi, AlRajhi, الراجحي]
+  - id: wadaie
+    name: Wadaie
+    senders: [Wadaie, ودائع]
+    messageAliases: [Wadaie, ودائع]
+  - id: d360
+    name: D360
+    senders: [D360, D360Bank, D360 Bank]
+    messageAliases: [D360, D360Bank]
+  - id: stc
+    name: STC Bank
+    senders: [STC Bank, STCBank, بنك STC]
+    disposition: needs_review

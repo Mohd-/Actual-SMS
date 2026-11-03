@@ -12,6 +12,7 @@ services:
       - sms-data:/data
       - actual-cache:/actual-cache
       - ./config/accounts.yaml:/config/accounts.yaml:ro
+      - ./config/banks.yaml:/config/banks.yaml:ro
     healthcheck:
       test:
         [

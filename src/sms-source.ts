@@ -1,59 +1,32 @@
-import type { Bank } from './types.js';
+import type { Bank, BankConfig } from './types.js';
+import { normalizeSender } from './config.js';
 
 export type SmsSourceResolution =
   | { type: 'supported'; bank: Bank }
   | { type: 'unsupported'; disposition: 'ignored' | 'needs_review' };
 
-const senderRules: readonly { bank: Bank; patterns: readonly RegExp[] }[] = [
-  {
-    bank: 'sab',
-    patterns: [/(?:^|\b)(?:sab|saudi\s+awwal)(?:\b|$)|ساب|الأول/iu],
-  },
-  {
-    bank: 'alrajhi',
-    patterns: [/(?:al\s*rajhi|alrajhibank|الراجحي)/iu],
-  },
-];
-
-const messageFallbackRules: readonly { bank: Bank; patterns: readonly RegExp[] }[] = [
-  {
-    bank: 'sab',
-    patterns: [/(?:\b(?:sab|saudi\s+awwal)\b|ساب|الأول)/iu],
-  },
-  {
-    bank: 'alrajhi',
-    patterns: [/(?:\bal\s*rajhi\b|الراجحي)/iu],
-  },
-];
-
-const unsupportedReviewSenderPatterns = [/(?:^|\b)stc\s*bank(?:\b|$)|بنك\s*stc/iu] as const;
-
-function normalizeSourceText(value: string): string {
-  return value.replace(/\s+/gu, ' ').trim();
+function containsAlias(text: string, alias: string): boolean {
+  const escaped = normalizeSender(alias).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  return new RegExp(`(?:^|[^\\p{L}\\p{N}_])${escaped}(?=$|[^\\p{L}\\p{N}_])`, 'u').test(text);
 }
 
-function matches(text: string, patterns: readonly RegExp[]): boolean {
-  return patterns.some(pattern => pattern.test(text));
-}
-
-function identify(text: string, rules: typeof senderRules): Bank | undefined {
-  return rules.find(rule => matches(text, rule.patterns))?.bank;
-}
-
-/**
- * Identifies the source independently of the SMS transaction grammar. A named
- * sender is authoritative; message inspection is retained only for callers
- * using the legacy sender-optional contract.
- */
-export function resolveSmsSource(sender: string, message: string): SmsSourceResolution {
-  if (sender.trim()) {
-    const normalizedSender = normalizeSourceText(sender);
-    if (matches(normalizedSender, unsupportedReviewSenderPatterns))
-      return { type: 'unsupported', disposition: 'needs_review' };
-    const bank = identify(normalizedSender, senderRules);
-    return bank ? { type: 'supported', bank } : { type: 'unsupported', disposition: 'ignored' };
-  }
-
-  const bank = identify(normalizeSourceText(message), messageFallbackRules);
-  return bank ? { type: 'supported', bank } : { type: 'unsupported', disposition: 'ignored' };
+/** A named sender is authoritative; message aliases support legacy callers only. */
+export function resolveSmsSource(
+  sender: string,
+  message: string,
+  banks: readonly BankConfig[],
+): SmsSourceResolution {
+  const normalizedSender = normalizeSender(sender);
+  const matches = banks.filter(bank =>
+    normalizedSender
+      ? bank.senders.some(alias => normalizeSender(alias) === normalizedSender)
+      : bank.messageAliases.some(alias => containsAlias(normalizeSender(message), alias)),
+  );
+  // Ambiguous legacy message aliases must never select a bank by rule order.
+  if (matches.length > 1) return { type: 'unsupported', disposition: 'needs_review' };
+  const bank = matches[0];
+  if (!bank) return { type: 'unsupported', disposition: 'ignored' };
+  return bank.disposition === 'needs_review'
+    ? { type: 'unsupported', disposition: 'needs_review' }
+    : { type: 'supported', bank: bank.id };
 }

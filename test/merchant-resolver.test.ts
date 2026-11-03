@@ -1,3 +1,4 @@
+import { banks } from './fixtures/banks.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventStore } from '../src/db.js';
 import { merchantKey, MerchantResolver } from '../src/merchant-resolver.js';
@@ -9,6 +10,7 @@ afterEach(() => {
 });
 
 const config: ResolvedConfig = {
+  banks,
   accounts: [
     {
       key: 'checking',

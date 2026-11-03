@@ -1,3 +1,4 @@
+import { banks } from './fixtures/banks.js';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import YAML from 'yaml';
@@ -10,8 +11,9 @@ describe('public release configuration', () => {
     expect(read('.gitignore')).toContain('config/accounts.yaml');
     const config = await loadConfigFile(
       new URL('../config/accounts.example.yaml', import.meta.url).pathname,
+      banks,
     );
-    expect(config.accounts).toHaveLength(4);
+    expect(config.accounts).toHaveLength(6);
     expect(config.bankFeesCategory).toBe('Bank Fees');
   });
 
