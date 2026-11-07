@@ -21,7 +21,7 @@
     "smoke:disposable": "npm run build && node dist/scripts/smoke-disposable.js"
   },
   "dependencies": {
-    "@actual-app/api": "26.10.0",
+    "@actual-app/api": "26.11.0",
     "better-sqlite3": "^11.10.0",
     "fastify": "^5.12.8",
     "luxon": "^3.7.1",

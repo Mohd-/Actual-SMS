@@ -29,7 +29,7 @@ function setup(history: HistoricalTransaction[]) {
   stores.push(store);
   const actual: ActualAdapter = {
     initialize: async () => {},
-    serverVersion: async () => '26.10.0',
+    serverVersion: async () => '26.11.0',
     shutdown: async () => {},
     sync: vi.fn(async () => {}),
     accounts: async () => [],

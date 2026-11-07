@@ -14,7 +14,7 @@ You'll need:
 
 - An Android phone with Tasker 6.6 and SMS permission.
 - A machine with Docker Compose, Node.js 20+, and npm.
-- An Actual Budget server running **26.10.0**, matching the API version bundled with this service.
+- An Actual Budget server running **26.11.0**, matching the API version bundled with this service.
 - A budget with the accounts and categories you want to use already created in Actual.
 - An HTTPS address your phone can reach, with a reverse proxy forwarding requests to this service.
 
@@ -336,7 +336,7 @@ To include the OpenCode Go smoke test in the test run, set `LIVE_OPENCODE_GO_TES
 
 ### Upgrading Actual
 
-The `@actual-app/api` dependency is pinned to **26.10.0** to match the deployed Actual server. Startup logs both versions. A mismatch, or failure to discover the server version, produces a warning but doesn't prevent readiness. Authentication, budget download, and migration failures do prevent startup.
+The `@actual-app/api` dependency is pinned to **26.11.0** to match the deployed Actual server. Startup logs both versions. A mismatch, or failure to discover the server version, produces a warning but doesn't prevent readiness. Authentication, budget download, and migration failures do prevent startup.
 
 When upgrading:
 
@@ -345,7 +345,7 @@ When upgrading:
 3. Run `npm run check` and `npm run build`.
 4. Rebuild the Docker image and run the disposable smoke test before deployment.
 
-If you see `out-of-sync-migrations`, update the API client to a version that includes your server's migrations. Keep the Node runtime compatible with the pinned API; API 26.10.0 requires Node 22 or newer.
+If you see `out-of-sync-migrations`, update the API client to a version that includes your server's migrations. Keep the Node runtime compatible with the pinned API; API 26.11.0 requires Node 22 or newer.
 
 ## License
 

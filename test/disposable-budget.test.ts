@@ -17,7 +17,7 @@ function setup(mode = 'success') {
     async (name: string, args?: { budgetName?: string; cloudFileId?: string; id?: string }) => {
       switch (name) {
         case 'get-server-version':
-          return { version: mode === 'version-mismatch' ? '0.0.0' : '26.10.0' };
+          return { version: mode === 'version-mismatch' ? '0.0.0' : '26.11.0' };
         case 'get-remote-files':
           return mode === 'unavailable' ? null : [...remote];
         case 'get-budgets':
