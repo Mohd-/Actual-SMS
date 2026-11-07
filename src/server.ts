@@ -92,7 +92,8 @@ export function buildServer(options: {
   apiKey: string;
   banks: BankConfig[];
   store: EventStore;
-  processor: Processor;
+  processor: Pick<Processor, 'tick'>;
+  maintenance?: { paused(): boolean; pause(): Promise<void> };
   ready: () => boolean;
   logger?: boolean | string;
 }) {
@@ -126,6 +127,13 @@ export function buildServer(options: {
     }
     if (!valid) return reply.code(401).send({ error: 'unauthorized' });
   });
+  if (options.maintenance) {
+    app.get('/v1/maintenance', async () => ({ paused: options.maintenance!.paused() }));
+    app.post('/v1/maintenance', async () => {
+      await options.maintenance!.pause();
+      return { paused: true };
+    });
+  }
   app.post('/v1/sms', async (req, reply) => {
     const parsed = bodySchema.safeParse(req.body);
     if (!parsed.success)

@@ -18,6 +18,7 @@ const retryMs = [60_000, 300_000, 1_800_000, 7_200_000];
 export class Processor {
   private timer?: NodeJS.Timeout;
   private running = false;
+  private stopped = false;
   private merchantResolver: MerchantResolver;
   constructor(
     private store: EventStore,
@@ -36,17 +37,19 @@ export class Processor {
     return this.merchantResolver.refresh();
   }
   start() {
+    this.stopped = false;
     this.store.recover();
     this.store.replayParserRevision(PARSER_REVISION);
     this.timer = setInterval(() => void this.tick(), 500);
     void this.tick();
   }
   async stop() {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     while (this.running) await new Promise(r => setTimeout(r, 20));
   }
   async tick() {
-    if (this.running) return;
+    if (this.running || this.stopped) return;
     const event = this.store.claim();
     if (!event) return;
     this.running = true;

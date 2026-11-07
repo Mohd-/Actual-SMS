@@ -21,7 +21,7 @@ You'll need:
 Have your Actual server URL, server password, and budget Sync ID ready. You can find the Sync ID in Actual under **Settings → Show advanced settings → Sync ID**. If your budget is encrypted, you'll also need its encryption password.
 
 > [!WARNING]
-> Keep the Actual server and this service's bundled API on matching versions. A mismatch logs a warning but may still allow startup, so a healthy service does not guarantee that imports will work. Follow [Upgrading Actual](#upgrading-actual) when updating your server.
+> Keep the Actual server and this service's bundled API on matching versions. A mismatch or failed version discovery blocks startup before opening the production budget. Follow [Upgrading Actual](#upgrading-actual) when updating your server.
 
 ### 2. Run the setup wizard
 
@@ -296,7 +296,7 @@ npm install
 npm run check
 ```
 
-Normal tests don't contact Actual or OpenCode and need no services or environment variables. `npm run check` runs formatting, lint, type checking, and tests in that order. Run it before considering a change complete; this repository has no CI to run it for you.
+Normal tests don't contact Actual or OpenCode and need no services or environment variables. `npm run check` runs formatting, lint, type checking, and tests in that order. Run it before considering a change complete; GitHub CI also runs this gate and the build.
 
 Useful commands:
 
@@ -336,9 +336,9 @@ To include the OpenCode Go smoke test in the test run, set `LIVE_OPENCODE_GO_TES
 
 ### Upgrading Actual
 
-The `@actual-app/api` dependency is pinned to **26.11.0** to match the deployed Actual server. Startup logs both versions. A mismatch, or failure to discover the server version, produces a warning but doesn't prevent readiness. Authentication, budget download, and migration failures do prevent startup.
+The `@actual-app/api` dependency is pinned to **26.11.0** to match the deployed Actual server. Startup reads the installed API version and checks server metadata before opening the budget. Mismatches and discovery failures block imports. Authentication, download, and migration failures also prevent startup.
 
-When upgrading:
+When upgrading manually:
 
 1. Upgrade the Actual server.
 2. Set `@actual-app/api` to that exact version, without `^` or `~`, and regenerate `package-lock.json`.
