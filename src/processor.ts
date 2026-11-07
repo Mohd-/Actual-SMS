@@ -12,6 +12,7 @@ import { EventStore, type StoredEvent } from './db.js';
 import { PARSER_REVISION, parseSms } from './parser.js';
 import { resolveAccount, resolveBillPaymentAccount, resolveTransferAccount } from './routing.js';
 import { MerchantResolver, merchantKey } from './merchant-resolver.js';
+import { WorkGate } from './work-gate.js';
 
 const retryMs = [60_000, 300_000, 1_800_000, 7_200_000];
 // Historical imports used the parsed SMS suffix. Keep that stable whenever a
@@ -43,12 +44,19 @@ export class Processor {
     private maxAttempts = 5,
     private minConfidence = 0.7,
     merchantResolver?: MerchantResolver,
+    private gate = new WorkGate(),
   ) {
     this.merchantResolver =
       merchantResolver ?? new MerchantResolver(store, actual, config, minConfidence);
   }
-  refreshMappings() {
-    return this.merchantResolver.refresh();
+  async refreshMappings() {
+    const release = this.gate.enter();
+    if (!release) return;
+    try {
+      await this.merchantResolver.refresh();
+    } finally {
+      release();
+    }
   }
   start() {
     this.store.recover();
@@ -62,12 +70,16 @@ export class Processor {
   }
   async tick() {
     if (this.running) return;
-    const event = this.store.claim();
-    if (!event) return;
+    const release = this.gate.enter();
+    if (!release) return;
+    let event: StoredEvent | undefined;
     this.running = true;
     try {
+      event = this.store.claim();
+      if (!event) return;
       await this.process(event);
     } catch (error) {
+      if (!event) throw error;
       const attempts = event.attempts + 1,
         message = error instanceof Error ? error.message : String(error);
       if (attempts < this.maxAttempts)
@@ -81,7 +93,20 @@ export class Processor {
       else this.store.update(event.id, 'failed', { attempts, error: message });
     } finally {
       this.running = false;
+      release();
     }
+  }
+  private async importTransactions(
+    eventId: string,
+    accountId: string,
+    transactions: Parameters<ActualAdapter['importTransactions']>[1],
+    principal = true,
+  ) {
+    const result = await this.actual.importTransactions(accountId, transactions);
+    const actualTransactionId = result.added[0] ?? result.updated[0];
+    if (principal && actualTransactionId)
+      this.store.update(eventId, 'processing', { actualTransactionId });
+    if (result.errors.length) throw new Error(result.errors.map(error => error.message).join('; '));
   }
   private async process(event: StoredEvent) {
     const input = JSON.parse(event.payload!) as SmsInput;
@@ -194,7 +219,7 @@ export class Processor {
         kind: tx.kind,
       });
     }
-    const date = DateTime.fromISO(tx.occurredAt).toISODate()!;
+    const date = DateTime.fromISO(tx.occurredAt, { setZone: true }).toISODate()!;
     const notes = [
       tx.note,
       tx.foreign ? `${tx.foreign.amount} ${tx.foreign.currency}` : '',
@@ -263,7 +288,7 @@ export class Processor {
         const payee = await this.actual.transferPayee(target.id);
         const principal =
           tx.principalCents ?? (tx.amountCents < 0 ? tx.amountCents + tx.feeCents : tx.amountCents);
-        await this.actual.importTransactions(account.id, [
+        await this.importTransactions(event.id, account.id, [
           {
             date,
             amount: principal,
@@ -273,16 +298,21 @@ export class Processor {
           },
         ]);
         if (tx.feeCents)
-          await this.actual.importTransactions(account.id, [
-            {
-              date,
-              amount: -tx.feeCents,
-              payee_name: 'Bank Fees',
-              category: this.config.bankFeesCategoryId,
-              notes,
-              imported_id: stableId(tx, account.key, 'fee'),
-            },
-          ]);
+          await this.importTransactions(
+            event.id,
+            account.id,
+            [
+              {
+                date,
+                amount: -tx.feeCents,
+                payee_name: 'Bank Fees',
+                category: this.config.bankFeesCategoryId,
+                notes,
+                imported_id: stableId(tx, account.key, 'fee'),
+              },
+            ],
+            false,
+          );
         this.store.recordTransfer(
           event.id,
           account.key,
@@ -291,7 +321,7 @@ export class Processor {
           tx.occurredAt,
         );
       } else {
-        await this.actual.importTransactions(account.id, [
+        await this.importTransactions(event.id, account.id, [
           {
             date,
             amount: tx.amountCents,
@@ -310,7 +340,7 @@ export class Processor {
         );
       }
     } else {
-      const imported = await this.actual.importTransactions(account.id, [
+      await this.importTransactions(event.id, account.id, [
         {
           date,
           amount: tx.amountCents,
@@ -321,10 +351,6 @@ export class Processor {
           imported_id: stableId(tx, account.key),
         },
       ]);
-      if (imported.errors.length)
-        throw new Error(imported.errors.map(error => error.message).join('; '));
-      const actualTransactionId = imported.added[0] ?? imported.updated[0];
-      if (actualTransactionId) this.store.update(event.id, 'processing', { actualTransactionId });
     }
     await this.actual.sync();
     this.store.update(event.id, review ? 'imported_review' : 'imported');
