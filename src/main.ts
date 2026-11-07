@@ -1,23 +1,36 @@
-import { loadParserConfig } from './parsing/config.js';
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { loadBankConfigFile, loadConfigFile, loadEnv } from './config.js';
+import { loadEnv } from './config.js';
 import { EventStore } from './db.js';
 import { ActualApiAdapter } from './actual.js';
-import { reportActualCompatibility } from './actual-version.js';
 import { NoopEnricher, OpenCodeGoEnricher } from './enricher.js';
 import { Processor } from './processor.js';
 import { buildServer } from './server.js';
-import type { ResolvedAccount, ResolvedConfig } from './types.js';
+import { Runtime } from './runtime.js';
+import { ConfigurationError, parseConfigFiles, readConfigFiles } from './runtime-config.js';
+import { ConfigEditor } from './config-editor.js';
+import { ManagementCredentials } from './management/credentials.js';
+import type { ResolvedConfig } from './types.js';
 
 const env = loadEnv();
 await Promise.all([
   mkdir(dirname(env.DB_PATH), { recursive: true }),
   mkdir(env.ACTUAL_CACHE_DIR, { recursive: true }),
 ]);
-const banks = await loadBankConfigFile(env.BANKS_CONFIG_PATH);
-const parsing = await loadParserConfig(env.PARSING_CONFIG_PATH, banks);
-const file = await loadConfigFile(env.CONFIG_PATH, banks);
+const paths = {
+  accounts: env.CONFIG_PATH,
+  banks: env.BANKS_CONFIG_PATH,
+  parsing: env.PARSING_CONFIG_PATH,
+};
+// File/schema errors remain fatal, even when management is enabled.
+const parsed = parseConfigFiles(await readConfigFiles(paths));
+const config: ResolvedConfig = {
+  banks: parsed.banks,
+  parsing: parsed.parsing,
+  accounts: [],
+  bankFeesCategoryId: '',
+  eligibleCategories: [],
+};
 const store = new EventStore(env.DB_PATH);
 const actual = new ActualApiAdapter({
   serverURL: env.ACTUAL_SERVER_URL,
@@ -26,33 +39,14 @@ const actual = new ActualApiAdapter({
   encryptionPassword: env.ACTUAL_ENCRYPTION_PASSWORD,
   dataDir: env.ACTUAL_CACHE_DIR,
 });
-let ready = false;
+const runtime = new Runtime(actual, config, paths);
 try {
-  await actual.initialize();
-  await reportActualCompatibility(actual);
-  const [accounts, categories] = await Promise.all([actual.accounts(), actual.categories()]);
-  const resolvedAccounts: ResolvedAccount[] = [];
-  for (const mapping of file.accounts) {
-    const matches = accounts.filter(a => a.name === mapping.actualName);
-    if (matches.length !== 1)
-      throw new Error(`Actual account must resolve exactly once: ${mapping.actualName}`);
-    resolvedAccounts.push({ key: matches[0]!.id, ...matches[0]!, match: mapping.match });
-  }
-  const fee = categories.filter(c => c.name === file.bankFeesCategory);
-  if (fee.length !== 1)
-    throw new Error(`Bank Fees category must resolve exactly once: ${file.bankFeesCategory}`);
-  const eligible = file.eligibleCategories?.length
-    ? categories.filter(c => file.eligibleCategories!.includes(c.name))
-    : categories.filter(c => c.name !== file.bankFeesCategory);
-  if (file.eligibleCategories?.some(name => !eligible.some(c => c.name === name)))
-    throw new Error('One or more eligible category names do not exist');
-  const config: ResolvedConfig = {
-    banks,
-    parsing,
-    accounts: resolvedAccounts,
-    bankFeesCategoryId: fee[0]!.id,
-    eligibleCategories: eligible.map(({ id, name }) => ({ id, name })),
-  };
+  await runtime.reconnect().catch(error => {
+    if (!env.MANAGEMENT_ENABLED || error instanceof ConfigurationError) throw error;
+    console.warn(
+      'Actual unavailable; imports paused. Use management to retry the configured connection.',
+    );
+  });
   const ai = env.OPENCODE_GO_API_KEY
     ? new OpenCodeGoEnricher(env.OPENCODE_GO_API_KEY, env.OPENCODE_GO_MODEL)
     : new NoopEnricher();
@@ -63,47 +57,62 @@ try {
     config,
     env.MAX_ATTEMPTS,
     env.ENRICHMENT_MIN_CONFIDENCE,
+    undefined,
+    runtime.gate,
   );
   await processor
     .refreshMappings()
-    .catch(error =>
-      console.warn('Initial merchant mapping refresh failed; using persisted mappings', error),
-    );
-  processor.start();
-  ready = true;
+    .catch(() => console.warn('Initial mapping refresh failed; using persisted mappings'));
+  const credentials = new ManagementCredentials(store.db);
   const app = buildServer({
     apiKey: env.API_KEY,
-    banks,
+    banks: () => config.banks,
     store,
     processor,
-    ready: () => ready,
+    ready: () => runtime.status().ready,
     logger: env.LOG_LEVEL,
+    taskerCredentials: credentials,
+    management: env.MANAGEMENT_ENABLED
+      ? {
+          runtime,
+          editor: new ConfigEditor(runtime, env.MANAGEMENT_EDIT_ACCOUNTS),
+          credentials,
+          origin: env.MANAGEMENT_URL!,
+          passwordHash: env.MANAGEMENT_PASSWORD_HASH!,
+          secret: env.MANAGEMENT_SECRET!,
+          refresh: () =>
+            processor
+              .refreshMappings()
+              .catch(() => app.log.warn('Mapping refresh failed; using persisted mappings')),
+        }
+      : undefined,
   });
-  const mappingRefresh = setInterval(
+  const timer = setInterval(
     () =>
       void processor
         .refreshMappings()
-        .catch(error => app.log.warn({ error }, 'merchant mapping refresh failed')),
-    env.MAPPING_REFRESH_MINUTES * 60_000,
+        .catch(() => app.log.warn('Mapping refresh failed; using persisted mappings')),
+    env.MAPPING_REFRESH_MINUTES * 60000,
   );
-  mappingRefresh.unref();
+  timer.unref();
+  let stopping = false;
   const shutdown = async (signal: string) => {
-    ready = false;
-    clearInterval(mappingRefresh);
+    if (stopping) return;
+    stopping = true;
+    runtime.beginShutdown();
+    clearInterval(timer);
     app.log.info({ signal }, 'shutting down');
     await app.close();
     await processor.stop();
-    await actual.sync().catch(() => {});
-    await actual.shutdown();
+    await runtime.shutdown();
     store.close();
-    process.exit(0);
   };
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
   await app.listen({ host: '0.0.0.0', port: env.PORT });
+  processor.start();
 } catch (error) {
-  ready = false;
-  await actual.shutdown().catch(() => {});
+  await runtime.shutdown().catch(() => {});
   store.close();
   throw error;
 }

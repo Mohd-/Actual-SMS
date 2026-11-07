@@ -17,18 +17,24 @@
     "check": "npm run format:check && npm run lint && npm run typecheck && npm test",
     "setup": "sh scripts/setup-docker.sh",
     "setup:host": "node --import tsx src/setup.ts",
-    "smoke:actual": "node --import tsx scripts/smoke-actual.ts"
+    "smoke:actual": "node --import tsx scripts/smoke-actual.ts",
+    "management:password": "node --import tsx src/management/password.ts",
+    "test:web": "npm run build && node --import tsx scripts/smoke-management.ts"
   },
   "dependencies": {
     "@actual-app/api": "26.5.2",
+    "@fastify/rate-limit": "^10.3.0",
+    "@fastify/secure-session": "^8.4.2",
+    "bcryptjs": "^3.0.3",
     "better-sqlite3": "^11.10.0",
-    "fastify": "^5.5.0",
+    "fastify": "^5.12.8",
     "luxon": "^3.7.1",
     "yaml": "^2.8.1",
     "zod": "^3.25.76"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
+    "@playwright/test": "^1.65.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/luxon": "^3.7.1",
     "@types/node": "^22.17.2",
@@ -42,5 +48,8 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "overrides": {
+    "@fastify/cookie": "11.0.2"
   }
 }

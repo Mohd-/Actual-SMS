@@ -1,0 +1,6 @@
+# Opt-in UI; account files remain read-only with the base Compose configuration.
+# docker compose -f compose.example.yaml -f compose.management.example.yaml up --build -d
+services:
+  actual-sms:
+    environment:
+      MANAGEMENT_ENABLED: '1'

@@ -86,6 +86,12 @@ Replace the example URL and key with your own. An event marked `needs_review` ne
 
 If no events arrive, check Tasker's run log, SMS permission, project variables, and access to the HTTPS address. If events arrive but won't import, check the service logs and your Actual account/category names. Whenever you change the service URL or API key, update the project's values on your phone too.
 
+## Optional web management
+
+An opt-in management page provides importer status, read-only SMS audit, YAML-backed account editing, and Tasker project/checkpoint management. Existing headless deployments keep working unchanged. The browser does not introduce another configuration authority, parser, or financial dashboard; manual transaction approval is not enabled.
+
+See [Browser management](docs/management.md) for secure provisioning, read-only and writable-directory deployment options, verification, and rollback. The [adoption plan](docs/web-management-adoption-plan.md) records the scope and the separate manual-review design gate.
+
 ## Configuration
 
 The main configuration files are:

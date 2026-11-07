@@ -4,6 +4,9 @@ data/
 .env
 .gitenv
 config/accounts.yaml
+config/editable/
+config/*.previous
+config/*.tmp
 compose.host-override.yaml
 compose.proxy.yaml
 actual-cache/

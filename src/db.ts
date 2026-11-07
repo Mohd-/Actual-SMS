@@ -37,7 +37,7 @@ export interface MerchantMapping {
   updated_at: string;
 }
 export class InboxCheckpointConflict extends Error {
-  constructor(readonly checkpoint: InboxCheckpoint) {
+  constructor(readonly checkpoint: InboxCheckpoint | null) {
     super('Inbox checkpoint changed');
   }
 }
@@ -126,6 +126,28 @@ export class EventStore {
       .prepare('SELECT cursor_date,cursor_id FROM inbox_sync_state WHERE singleton=1')
       .get() as { cursor_date: number; cursor_id: number } | undefined;
     return row ? { date: row.cursor_date, rowId: row.cursor_id } : undefined;
+  }
+  setInboxCheckpoint(date: number, expected: InboxCheckpoint | null) {
+    if (!Number.isSafeInteger(date) || date < 0 || date > Date.now())
+      throw new Error('Invalid checkpoint date');
+    return this.db.transaction(() => {
+      const current = this.inboxCheckpoint() ?? null;
+      if (current?.date !== expected?.date || current?.rowId !== expected?.rowId)
+        throw new InboxCheckpointConflict(current);
+      const checkpoint = { date, rowId: 0 };
+      this.db
+        .prepare(
+          'INSERT INTO inbox_sync_state(singleton,cursor_date,cursor_id,updated_at) VALUES(1,?,0,?) ON CONFLICT(singleton) DO UPDATE SET cursor_date=excluded.cursor_date,cursor_id=0,updated_at=excluded.updated_at',
+        )
+        .run(date, new Date().toISOString());
+      return checkpoint;
+    })();
+  }
+  counts() {
+    return this.db.prepare('SELECT status,COUNT(*) count FROM events GROUP BY status').all() as {
+      status: EventStatus;
+      count: number;
+    }[];
   }
   commitInboxBatch(expected: InboxCheckpoint, entries: InboxSyncEntry[]) {
     return this.db.transaction(() => {

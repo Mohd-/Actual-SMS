@@ -1,0 +1,13 @@
+.git
+node_modules
+dist
+.env
+.env.*
+.gitenv
+data
+actual-cache
+config/accounts.yaml
+config/editable
+*.previous
+*.tmp
+*.log

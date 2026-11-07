@@ -4,6 +4,9 @@ import { InboxCheckpointConflict, type EventStore } from './db.js';
 import type { BankConfig } from './types.js';
 import type { Processor } from './processor.js';
 import { resolveSmsSource } from './sms-source.js';
+import { eventQuerySchema, listEvents, eventDetail } from './event-queries.js';
+import { registerManagement, type ManagementOptions } from './management/routes.js';
+import type { ManagementCredentials } from './management/credentials.js';
 
 const smsInputSchema = z.object({
   eventId: z.string().min(1).max(200).optional(),
@@ -71,30 +74,15 @@ const inboxBatchSchema = z
   .object({ checkpoint: checkpointSchema, rows: inboxRowSchema.array().min(1).max(25) })
   .strict();
 const rewindSchema = z.object({ date: z.number().int().min(0) }).strict();
-const eventStatusSchema = z.enum([
-  'queued',
-  'processing',
-  'imported',
-  'ignored',
-  'needs_review',
-  'imported_review',
-  'failed',
-]);
-const listQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(200).default(50),
-  cursor: z.string().optional(),
-  status: eventStatusSchema.optional(),
-  enrichmentStatus: z.string().min(1).max(100).optional(),
-  from: z.string().datetime({ offset: true }).optional(),
-  to: z.string().datetime({ offset: true }).optional(),
-});
 export function buildServer(options: {
   apiKey: string;
-  banks: BankConfig[];
+  banks: BankConfig[] | (() => BankConfig[]);
   store: EventStore;
   processor: Processor;
   ready: () => boolean;
   logger?: boolean | string;
+  management?: ManagementOptions;
+  taskerCredentials?: Pick<ManagementCredentials, 'isTaskerKey'>;
 }) {
   const app = Fastify({
     logger: options.logger
@@ -102,6 +90,12 @@ export function buildServer(options: {
           level: typeof options.logger === 'string' ? options.logger : 'info',
           redact: [
             'req.headers.x-api-key',
+            'req.headers.cookie',
+            'res.headers.set-cookie',
+            'req.headers.authorization',
+            'req.body.password',
+            'req.body.key',
+            'req.body.accounts',
             'req.body.message',
             'req.body.events[*].message',
             'req.body.rows[*].message',
@@ -116,7 +110,29 @@ export function buildServer(options: {
   );
   app.addHook('onRequest', async (req, reply) => {
     if (req.url === '/healthz' || req.url === '/readyz') return;
+    if (
+      options.management &&
+      (req.url === '/manage' ||
+        req.url.startsWith('/manage/') ||
+        req.url.startsWith('/management/'))
+    )
+      return;
     const supplied = req.headers['x-api-key'];
+    if ((options.taskerCredentials ?? options.management?.credentials)?.isTaskerKey(supplied)) {
+      const path = req.url.split('?')[0];
+      if (
+        req.method === 'POST' &&
+        [
+          '/v1/sms',
+          '/v1/sms/batch',
+          '/v1/inbox-sync/start',
+          '/v1/inbox-sync/batch',
+          '/v1/inbox-sync/rewind',
+        ].includes(path!)
+      )
+        return;
+      return reply.code(403).send({ error: 'Restricted Tasker credential' });
+    }
     let valid = false;
     if (typeof supplied === 'string' && supplied.length === options.apiKey.length) {
       let v = 0;
@@ -213,7 +229,11 @@ export function buildServer(options: {
       const entries = parsed.data.rows.map(row => {
         const message = row.message?.trim();
         if (!message) return { row, skipped: 'empty' as const };
-        const source = resolveSmsSource(row.sender ?? '', message, options.banks);
+        const source = resolveSmsSource(
+          row.sender ?? '',
+          message,
+          typeof options.banks === 'function' ? options.banks() : options.banks,
+        );
         if (source.type === 'unsupported' && source.disposition === 'ignored')
           return { row, skipped: 'unsupported' as const };
         return {
@@ -254,80 +274,22 @@ export function buildServer(options: {
     return { checkpoint: result.checkpoint, changed: result.changed };
   });
   app.get<{ Querystring: Record<string, unknown> }>('/v1/events', async (req, reply) => {
-    const query = listQuerySchema.safeParse(req.query);
+    const query = eventQuerySchema.safeParse(req.query);
     if (!query.success)
       return reply.code(400).send({ error: 'invalid_query', details: query.error.issues });
-    let before: { createdAt: string; id: string } | undefined;
-    if (query.data.cursor) {
-      try {
-        const decoded = JSON.parse(
-          Buffer.from(query.data.cursor, 'base64url').toString('utf8'),
-        ) as unknown;
-        before = z.object({ createdAt: z.string(), id: z.string() }).parse(decoded);
-      } catch {
-        return reply.code(400).send({ error: 'invalid_cursor' });
-      }
+    try {
+      return listEvents(options.store, query.data);
+    } catch {
+      return reply.code(400).send({ error: 'invalid_cursor' });
     }
-    const rows = options.store.list({
-      limit: query.data.limit + 1,
-      before,
-      status: query.data.status,
-      enrichmentStatus: query.data.enrichmentStatus,
-      from: query.data.from,
-      to: query.data.to,
-    });
-    const hasMore = rows.length > query.data.limit;
-    const page = rows.slice(0, query.data.limit);
-    const last = page.at(-1);
-    return {
-      events: page.map(event => ({
-        eventId: event.id,
-        status: event.status,
-        attempts: event.attempts,
-        parserReason: event.parser_reason,
-        error: event.error,
-        enrichmentStatus: event.enrichment_status,
-        createdAt: event.created_at,
-        updatedAt: event.updated_at,
-      })),
-      nextCursor:
-        hasMore && last
-          ? Buffer.from(JSON.stringify({ createdAt: last.created_at, id: last.id })).toString(
-              'base64url',
-            )
-          : undefined,
-    };
   });
   app.get<{ Params: { id: string } }>('/v1/events/:id', async (req, reply) => {
-    const e = options.store.get(req.params.id);
-    if (!e) return reply.code(404).send({ error: 'not_found' });
-    return {
-      eventId: e.id,
-      status: e.status,
-      attempts: e.attempts,
-      parsed: e.parsed ? JSON.parse(e.parsed) : undefined,
-      suggestion: e.suggestion ? JSON.parse(e.suggestion) : undefined,
-      parserReason: e.parser_reason,
-      error: e.error,
-      enrichmentStatus: e.enrichment_status,
-      actualTransactionId: e.actual_transaction_id,
-      input: e.payload ? JSON.parse(e.payload) : undefined,
-      history: options.store.eventHistory(e.id).map(item => ({
-        id: item.id,
-        fromStatus: item.from_status,
-        toStatus: item.to_status,
-        details: JSON.parse(item.details),
-        createdAt: item.created_at,
-      })),
-      enrichmentAttempts: options.store.enrichmentAttempts(e.id).map(item => ({
-        id: item.id,
-        status: item.status,
-        details: JSON.parse(item.details),
-        createdAt: item.created_at,
-      })),
-      createdAt: e.created_at,
-      updatedAt: e.updated_at,
-    };
+    const event = eventDetail(options.store, req.params.id);
+    return event ?? reply.code(404).send({ error: 'not_found' });
   });
+  if (options.management)
+    app.register(async management =>
+      registerManagement(management, options.management!, options.store),
+    );
   return app;
 }

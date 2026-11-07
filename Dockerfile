@@ -14,9 +14,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends tini ca-certifi
 WORKDIR /app
 COPY package*.json ./
 COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/dist/src ./dist
+COPY --from=build /app/dist/src ./dist/src
+COPY web ./web
+COPY tasker ./tasker
 RUN mkdir -p /data /actual-cache && chown node:node /data /actual-cache
 USER node
 EXPOSE 3000
 ENTRYPOINT ["tini","--"]
-CMD ["node","dist/main.js"]
+CMD ["node","dist/src/main.js"]
