@@ -14,14 +14,14 @@ You'll need:
 
 - An Android phone with Tasker 6.6 and SMS permission.
 - A machine with Docker Compose, Node.js 20+, and npm.
-- An Actual Budget server running **26.5.2**, matching the API version bundled with this service.
+- An Actual Budget server running **26.11.0**, matching the API version bundled with this service.
 - A budget with the accounts and categories you want to use already created in Actual.
 - An HTTPS address your phone can reach, with a reverse proxy forwarding requests to this service.
 
 Have your Actual server URL, server password, and budget Sync ID ready. You can find the Sync ID in Actual under **Settings → Show advanced settings → Sync ID**. If your budget is encrypted, you'll also need its encryption password.
 
 > [!WARNING]
-> Keep the Actual server and this service's bundled API on matching versions. A mismatch logs a warning but may still allow startup, so a healthy service does not guarantee that imports will work. Follow [Upgrading Actual](#upgrading-actual) when updating your server.
+> Keep the Actual server and this service's bundled API on matching versions. A mismatch or failed version discovery blocks startup before opening the production budget. Follow [Upgrading Actual](#upgrading-actual) when updating your server.
 
 ### 2. Run the setup wizard
 
@@ -302,7 +302,7 @@ npm install
 npm run check
 ```
 
-Normal tests don't contact Actual or OpenCode and need no services or environment variables. `npm run check` runs formatting, lint, type checking, and tests in that order. Run it before considering a change complete; this repository has no CI to run it for you.
+Normal tests don't contact Actual or OpenCode and need no services or environment variables. `npm run check` runs formatting, lint, type checking, and tests in that order. Run it before considering a change complete; GitHub CI also runs this gate and the build.
 
 Useful commands:
 
@@ -317,7 +317,7 @@ Useful commands:
 | `npm run format`                     | Apply Prettier formatting                           |
 | `npm run lint:fix`                   | Apply safe ESLint fixes                             |
 
-The service uses Fastify and runs on Node 20 in the production image. The container runs as the non-root `node` user, with writable `/data` and `/actual-cache` mounts.
+The service uses Fastify and runs on Node 22 in the production image. The container runs as the non-root `node` user, with writable `/data` and `/actual-cache` mounts.
 
 ### Disposable Actual smoke test
 
@@ -342,17 +342,41 @@ To include the OpenCode Go smoke test in the test run, set `LIVE_OPENCODE_GO_TES
 
 ### Upgrading Actual
 
-The `@actual-app/api` dependency is pinned to **26.5.2** to match the deployed Actual server. Startup logs both versions. A mismatch, or failure to discover the server version, produces a warning but doesn't prevent readiness. Authentication, budget download, and migration failures do prevent startup.
+The `@actual-app/api` dependency is pinned to **26.11.0** to match the deployed Actual server. Startup reads the installed API version and checks server metadata before opening the budget. Mismatches and discovery failures block imports. Authentication, download, and migration failures also prevent startup.
 
-When upgrading:
+When upgrading manually:
 
 1. Upgrade the Actual server.
 2. Set `@actual-app/api` to that exact version, without `^` or `~`, and regenerate `package-lock.json`.
 3. Run `npm run check` and `npm run build`.
 4. Rebuild the Docker image and run the disposable smoke test before deployment.
 
-If you see `out-of-sync-migrations`, update the API client to a version that includes your server's migrations. The moderate advisory inherited through `@actual-app/crdt` is accepted while compatibility requires the 26.5.2 pin.
+If you see `out-of-sync-migrations`, update the API client to a version that includes your server's migrations. Keep the Node runtime compatible with the pinned API; API 26.11.0 requires Node 22 or newer.
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+### Automatically managed disposable smoke budget
+
+`npm run smoke:disposable` creates a new empty budget on the configured Actual
+server, creates synthetic accounts and categories, runs the original smoke test
+from a separate client cache, and exercises the SMS processor against the real API.
+It verifies merchant classification, Riyadh dates, equal-purchase identities,
+linked transfers, fees, and retry idempotency before deleting the disposable budget.
+It never downloads or opens an existing budget. Remote cleanup is independently
+verified because Actual's low-level deletion handler can suppress server errors.
+
+Explicitly set `LIVE_ACTUAL_TEST=1`, `ACTUAL_SMOKE_CREATE_BUDGET=1`,
+`ACTUAL_SERVER_URL`, and `ACTUAL_SMOKE_PASSWORD`. No production budget Sync ID is
+required. Normal service startup still never creates accounts or categories.
+Use a Node 22 environment with working native dependencies, or run the compiled
+smoke runner shipped in the production image:
+`node /app/validation/scripts/smoke-disposable.js`. For that container command, mount
+the nonpersonal bank/parsing YAML files read-only and set their container paths via
+`BANKS_CONFIG_PATH` and `PARSING_CONFIG_PATH`. Use a private env file for credentials.
+Do not mount production queue or cache volumes into the smoke container.
+
+Optional `ACTUAL_SMOKE_REPORT_PATH` writes an owner-only lifecycle report. A
+passing result is written only after both validation and cleanup succeed. On cleanup failure, the command exits nonzero and
+reports the unique temporary budget name and retained cache for recovery.

@@ -88,8 +88,11 @@ export class Runtime {
     this.beginShutdown();
     while (this.gate.busy) await new Promise(resolve => setTimeout(resolve, 10));
     await this.gate.change(async () => {
-      await this.actual.sync().catch(() => {});
-      await this.actual.shutdown();
+      if (this.attempted) {
+        await this.actual.sync().catch(() => {});
+        await this.actual.shutdown();
+        this.attempted = false;
+      }
       this.connected = false;
     });
   }

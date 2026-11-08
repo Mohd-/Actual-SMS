@@ -90,7 +90,7 @@ describe('YAML bank registry', () => {
       initialize: async () => {},
       shutdown: async () => {},
       sync: async () => {},
-      serverVersion: async () => '26.5.2',
+      serverVersion: async () => '26.11.0',
       accounts: async () => [],
       categories: async () => [],
       transactions: async () => [],
@@ -204,7 +204,7 @@ describe('YAML bank registry', () => {
       [bank, { id: 'other', name: 'Other', senders: ['Other'], messageAliases: ['EXAMPLE BANK'] }],
       'Duplicate message alias',
     ],
-    ['empty aliases', [{ ...bank, senders: [' '] }], 'at least 1 character'],
+    ['empty aliases', [{ ...bank, senders: [' '] }], 'too_small'],
     ['invalid IDs', [{ ...bank, id: 'Invalid ID' }], 'Invalid'],
     ['unknown settings', [{ ...bank, sender: ['Typo'] }], 'Unrecognized key'],
   ])('rejects %s', (_name, banks, error) => {

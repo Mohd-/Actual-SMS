@@ -1,4 +1,5 @@
 import { loadActualApi } from './actual-sdk.js';
+import { preflightActualVersion } from './actual-version.js';
 import type { ActualAdapter, ActualTransaction } from './types.js';
 
 export class ActualApiAdapter implements ActualAdapter {
@@ -12,6 +13,7 @@ export class ActualApiAdapter implements ActualAdapter {
     },
   ) {}
   async initialize() {
+    await preflightActualVersion(this.options.serverURL);
     const actual = await loadActualApi();
     await actual.init({
       serverURL: this.options.serverURL,

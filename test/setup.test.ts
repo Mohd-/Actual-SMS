@@ -25,10 +25,10 @@ describe('setup helpers', () => {
 
   it('preflights the Actual sync endpoint and exposes HTTP errors', async () => {
     const ok = async () =>
-      new Response(JSON.stringify({ build: { version: '26.5.2' } }), {
+      new Response(JSON.stringify({ build: { version: '26.11.0' } }), {
         headers: { 'content-type': 'application/json' },
       });
-    await expect(verifyActualServer('http://actual.test:5006/', ok)).resolves.toBe('26.5.2');
+    await expect(verifyActualServer('http://actual.test:5006/', ok)).resolves.toBe('26.11.0');
     await expect(
       verifyActualServer('https://actual.test', async () => new Response('', { status: 404 })),
     ).rejects.toThrow('HTTP 404');

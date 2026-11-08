@@ -472,3 +472,50 @@ describe('event API', () => {
     expect(detail.json().enrichmentAttempts).toHaveLength(1);
   });
 });
+
+it('keeps authenticated intake available during maintenance', async () => {
+  const store = new EventStore(':memory:');
+  stores.push(store);
+  let paused = false;
+  const tick = vi.fn(async () => {});
+  const app = buildServer({
+    apiKey: 'secret',
+    banks,
+    store,
+    processor: { tick },
+    ready: () => !paused,
+    maintenance: {
+      paused: () => paused,
+      pause: async () => {
+        paused = true;
+      },
+    },
+  });
+  expect((await app.inject({ method: 'POST', url: '/v1/maintenance' })).statusCode).toBe(401);
+  expect(
+    (
+      await app.inject({
+        method: 'POST',
+        url: '/v1/maintenance',
+        headers: { 'x-api-key': 'secret' },
+      })
+    ).statusCode,
+  ).toBe(200);
+  expect((await app.inject({ url: '/readyz' })).statusCode).toBe(503);
+  expect(
+    (
+      await app.inject({
+        method: 'POST',
+        url: '/v1/sms',
+        headers: { 'x-api-key': 'secret' },
+        payload: {
+          eventId: 'during-maintenance',
+          message: 'synthetic',
+          receivedAt: '2026-11-07T10:00:00Z',
+        },
+      })
+    ).statusCode,
+  ).toBe(202);
+  expect(store.get('during-maintenance')?.status).toBe('queued');
+  await app.close();
+});

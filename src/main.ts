@@ -1,5 +1,6 @@
-import { mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { loadEnv } from './config.js';
 import { EventStore } from './db.js';
 import { ActualApiAdapter } from './actual.js';
@@ -32,6 +33,8 @@ const config: ResolvedConfig = {
   eligibleCategories: [],
 };
 const store = new EventStore(env.DB_PATH);
+const maintenanceFile = join(dirname(env.DB_PATH), 'actual-sms-maintenance');
+let maintenancePaused = existsSync(maintenanceFile);
 const actual = new ActualApiAdapter({
   serverURL: env.ACTUAL_SERVER_URL,
   password: env.ACTUAL_PASSWORD,
@@ -40,13 +43,15 @@ const actual = new ActualApiAdapter({
   dataDir: env.ACTUAL_CACHE_DIR,
 });
 const runtime = new Runtime(actual, config, paths);
+if (maintenancePaused) runtime.beginShutdown();
 try {
-  await runtime.reconnect().catch(error => {
-    if (!env.MANAGEMENT_ENABLED || error instanceof ConfigurationError) throw error;
-    console.warn(
-      'Actual unavailable; imports paused. Use management to retry the configured connection.',
-    );
-  });
+  if (!maintenancePaused)
+    await runtime.reconnect().catch(error => {
+      if (!env.MANAGEMENT_ENABLED || error instanceof ConfigurationError) throw error;
+      console.warn(
+        'Actual unavailable; imports paused. Use management to retry the configured connection.',
+      );
+    });
   const ai = env.OPENCODE_GO_API_KEY
     ? new OpenCodeGoEnricher(env.OPENCODE_GO_API_KEY, env.OPENCODE_GO_MODEL)
     : new NoopEnricher();
@@ -72,6 +77,17 @@ try {
     ready: () => runtime.status().ready,
     logger: env.LOG_LEVEL,
     taskerCredentials: credentials,
+    maintenance: {
+      paused: () => maintenancePaused,
+      pause: async () => {
+        await writeFile(maintenanceFile, 'paused by coordinated updater\n', { mode: 0o600 });
+        maintenancePaused = true;
+        runtime.beginShutdown();
+        clearInterval(timer);
+        await processor.stop();
+        await runtime.shutdown();
+      },
+    },
     management: env.MANAGEMENT_ENABLED
       ? {
           runtime,
@@ -110,7 +126,7 @@ try {
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
   await app.listen({ host: '0.0.0.0', port: env.PORT });
-  processor.start();
+  if (!maintenancePaused) processor.start();
 } catch (error) {
   await runtime.shutdown().catch(() => {});
   store.close();

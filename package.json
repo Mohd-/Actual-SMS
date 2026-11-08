@@ -19,10 +19,11 @@
     "setup:host": "node --import tsx src/setup.ts",
     "smoke:actual": "node --import tsx scripts/smoke-actual.ts",
     "management:password": "node --import tsx src/management/password.ts",
-    "test:web": "npm run build && node --import tsx scripts/smoke-management.ts"
+    "test:web": "npm run build && node --import tsx scripts/smoke-management.ts",
+    "smoke:disposable": "npm run build && node dist/scripts/smoke-disposable.js"
   },
   "dependencies": {
-    "@actual-app/api": "26.5.2",
+    "@actual-app/api": "26.11.0",
     "@fastify/rate-limit": "^10.3.0",
     "@fastify/secure-session": "^8.4.2",
     "bcryptjs": "^3.0.3",
@@ -30,7 +31,7 @@
     "fastify": "^5.12.8",
     "luxon": "^3.7.1",
     "yaml": "^2.8.1",
-    "zod": "^3.25.76"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
@@ -47,9 +48,6 @@
     "vitest": "^3.2.4"
   },
   "engines": {
-    "node": ">=20"
-  },
-  "overrides": {
-    "@fastify/cookie": "11.0.2"
+    "node": ">=22"
   }
 }

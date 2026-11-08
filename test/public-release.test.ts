@@ -36,3 +36,21 @@ describe('public release configuration', () => {
     expect(setupScript).not.toContain('ACTUAL_SMS_ACTUAL_HOST:-actual.');
   });
 });
+
+it('excludes credentials, account mappings and private state from Docker build contexts', () => {
+  const ignored = read('.dockerignore').split('\n');
+  for (const path of [
+    '.git',
+    '.env',
+    '.env.*',
+    '.gitenv',
+    'config/accounts.yaml',
+    'config/*.local.yaml',
+    'data',
+    'actual-cache',
+    '.migration-private',
+  ])
+    expect(ignored).toContain(path);
+  expect(read('.gitignore')).toContain('config/*.local.yaml');
+  expect(read('scripts/telegram-report.sh')).not.toMatch(/\/home\/[^/]+\//);
+});

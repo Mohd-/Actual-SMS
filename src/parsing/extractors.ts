@@ -86,6 +86,18 @@ export function createExtractors(fields: CompiledFields) {
   const value = (text: string, field: Field) => groups(text, field)?.value?.trim();
   return {
     value,
+    withoutMerchant: (text: string) => {
+      let result = text;
+      for (const pattern of fields.merchant ?? []) {
+        const match = new RegExp(pattern.source, pattern.flags + 'd').exec(result);
+        const bounds = match?.indices?.groups?.value;
+        if (bounds) {
+          const [start, end] = bounds;
+          result = result.slice(0, start) + ' '.repeat(end - start) + result.slice(end);
+        }
+      }
+      return result;
+    },
     extractAmount: (text: string, field: Field) => money(value(text, field)),
     extractSarEquivalent: (text: string) => money(value(text, 'sarEquivalent')),
     extractAccountAlias: (text: string) => value(text, 'accountAlias'),

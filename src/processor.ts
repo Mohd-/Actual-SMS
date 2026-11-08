@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { DateTime } from 'luxon';
 import type {
   ActualAdapter,
@@ -12,29 +11,15 @@ import { EventStore, type StoredEvent } from './db.js';
 import { PARSER_REVISION, parseSms } from './parser.js';
 import { resolveAccount, resolveBillPaymentAccount, resolveTransferAccount } from './routing.js';
 import { MerchantResolver, merchantKey } from './merchant-resolver.js';
+import { importId, migrateImportIdentities } from './import-identity.js';
+import type { ActualTransaction } from './types.js';
 import { WorkGate } from './work-gate.js';
 
 const retryMs = [60_000, 300_000, 1_800_000, 7_200_000];
-// Historical imports used the parsed SMS suffix. Keep that stable whenever a
-// source identifier was present, only falling back to the resolved account.
-const stableId = (tx: ParsedTransaction, accountKey: string, suffix = 'main') =>
-  'sms:' +
-  createHash('sha256')
-    .update(
-      [
-        tx.bank,
-        tx.accountAlias ?? accountKey,
-        tx.kind,
-        tx.occurredAt,
-        tx.amountCents,
-        tx.payee,
-        suffix,
-      ].join('|'),
-    )
-    .digest('hex');
 export class Processor {
   private timer?: NodeJS.Timeout;
   private running = false;
+  private stopped = false;
   private merchantResolver: MerchantResolver;
   constructor(
     private store: EventStore,
@@ -46,6 +31,7 @@ export class Processor {
     merchantResolver?: MerchantResolver,
     private gate = new WorkGate(),
   ) {
+    migrateImportIdentities(store, config);
     this.merchantResolver =
       merchantResolver ?? new MerchantResolver(store, actual, config, minConfidence);
   }
@@ -59,17 +45,19 @@ export class Processor {
     }
   }
   start() {
+    this.stopped = false;
     this.store.recover();
     this.store.replayParserRevision(PARSER_REVISION);
     this.timer = setInterval(() => void this.tick(), 500);
     void this.tick();
   }
   async stop() {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     while (this.running) await new Promise(r => setTimeout(r, 20));
   }
   async tick() {
-    if (this.running) return;
+    if (this.running || this.stopped) return;
     const release = this.gate.enter();
     if (!release) return;
     let event: StoredEvent | undefined;
@@ -99,7 +87,7 @@ export class Processor {
   private async importTransactions(
     eventId: string,
     accountId: string,
-    transactions: Parameters<ActualAdapter['importTransactions']>[1],
+    transactions: ActualTransaction[],
     principal = true,
   ) {
     const result = await this.actual.importTransactions(accountId, transactions);
@@ -227,6 +215,7 @@ export class Processor {
     ]
       .filter(Boolean)
       .join(' | ');
+    const id = (part = 'main') => importId(this.store, event, tx, account.key, part);
     if (isTransfer) {
       const counterpart = this.store
         .findTransferCounterparts(
@@ -252,6 +241,13 @@ export class Processor {
           if (priorTarget && priorTarget.key !== account.key) return false;
           return currentTarget !== undefined || priorTarget !== undefined;
         });
+      if (
+        counterpart &&
+        !['imported', 'imported_review'].includes(this.store.get(counterpart.event_id)!.status)
+      )
+        throw new Error(
+          'Transfer counterpart has not completed; retrying after its import and sync',
+        );
       const counterpartTx = counterpart
         ? (JSON.parse(this.store.get(counterpart.event_id)!.parsed!) as ParsedTransaction)
         : undefined;
@@ -288,13 +284,20 @@ export class Processor {
         const payee = await this.actual.transferPayee(target.id);
         const principal =
           tx.principalCents ?? (tx.amountCents < 0 ? tx.amountCents + tx.feeCents : tx.amountCents);
+        this.store.recordTransfer(
+          event.id,
+          account.key,
+          tx.transferCounterpartyAlias,
+          principal,
+          tx.occurredAt,
+        );
         await this.importTransactions(event.id, account.id, [
           {
             date,
             amount: principal,
             payee,
             notes,
-            imported_id: stableId(tx, account.key, 'principal'),
+            imported_id: id('principal'),
           },
         ]);
         if (tx.feeCents)
@@ -308,28 +311,12 @@ export class Processor {
                 payee_name: 'Bank Fees',
                 category: this.config.bankFeesCategoryId,
                 notes,
-                imported_id: stableId(tx, account.key, 'fee'),
+                imported_id: id('fee'),
               },
             ],
             false,
           );
-        this.store.recordTransfer(
-          event.id,
-          account.key,
-          tx.transferCounterpartyAlias,
-          principal,
-          tx.occurredAt,
-        );
       } else {
-        await this.importTransactions(event.id, account.id, [
-          {
-            date,
-            amount: tx.amountCents,
-            payee_name: tx.payee,
-            notes,
-            imported_id: stableId(tx, account.key),
-          },
-        ]);
         this.store.recordTransfer(
           event.id,
           account.key,
@@ -338,6 +325,15 @@ export class Processor {
           tx.occurredAt,
           counterpart?.event_id,
         );
+        await this.importTransactions(event.id, account.id, [
+          {
+            date,
+            amount: tx.amountCents,
+            payee_name: tx.payee,
+            notes,
+            imported_id: id(),
+          },
+        ]);
       }
     } else {
       await this.importTransactions(event.id, account.id, [
@@ -348,7 +344,7 @@ export class Processor {
           imported_payee: tx.payee,
           category: selectedCategory,
           notes,
-          imported_id: stableId(tx, account.key),
+          imported_id: id(),
         },
       ]);
     }

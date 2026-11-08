@@ -69,7 +69,7 @@ function setup() {
   const transferPayees: string[] = [];
   const actual: ActualAdapter = {
     initialize: async () => {},
-    serverVersion: async () => '26.5.2',
+    serverVersion: async () => '26.11.0',
     shutdown: async () => {},
     sync: async () => {},
     accounts: async () => [],

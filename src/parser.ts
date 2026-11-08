@@ -11,7 +11,7 @@ import { resolveSmsSource } from './sms-source.js';
 export { normalizeText } from './parsing/extractors.js';
 
 /** Increment when a parser release should re-evaluate retained parser outcomes. */
-export const PARSER_REVISION = 15;
+export const PARSER_REVISION = 16;
 
 export type ParserReason =
   | 'otp_or_login'
@@ -83,7 +83,9 @@ export function parseSms(
   config: ParserConfig,
 ): ParseResult {
   const text = normalizeText(raw);
-  const ignoredReason = classify(text, config.shared.ignored);
+  // Merchant descriptions are data, not notification or accounting markers.
+  const recognitionText = createExtractors(config.shared.fields).withoutMerchant(text);
+  const ignoredReason = classify(recognitionText, config.shared.ignored);
   if (ignoredReason) return { type: 'ignored', reason: ignoredReason };
 
   const source = resolveSmsSource(sender, text, banks);
@@ -121,7 +123,7 @@ export function parseSms(
                 : raw !== undefined && raw !== '';
     if (!valid) return { type: 'needs_review', reason: 'malformed_notification' };
   }
-  const kind = template?.kind ?? classify(text, config.shared.kinds);
+  const kind = template?.kind ?? classify(e.withoutMerchant(text), config.shared.kinds);
   if (!kind) return { type: 'needs_review', reason: 'unrecognized_template' };
 
   const biller = extractBiller(text);

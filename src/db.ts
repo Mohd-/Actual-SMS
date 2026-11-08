@@ -64,6 +64,8 @@ export class EventStore {
     CREATE TABLE IF NOT EXISTS actual_mapping_observations(actual_transaction_id TEXT PRIMARY KEY,account_id TEXT NOT NULL,merchant_key TEXT NOT NULL,payee TEXT NOT NULL,category_id TEXT NOT NULL,transaction_date TEXT NOT NULL,decision_at TEXT NOT NULL,updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS local_mapping_observations(source_ref TEXT PRIMARY KEY,account_id TEXT NOT NULL,merchant_key TEXT NOT NULL,payee TEXT NOT NULL,category_id TEXT NOT NULL,decision_at TEXT NOT NULL,updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS inbox_sync_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),cursor_date INTEGER NOT NULL,cursor_id INTEGER NOT NULL,updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS event_import_ids(event_id TEXT NOT NULL,part TEXT NOT NULL,legacy_id TEXT NOT NULL,imported_id TEXT NOT NULL,PRIMARY KEY(event_id,part));
+    CREATE INDEX IF NOT EXISTS event_import_ids_legacy ON event_import_ids(legacy_id);
     CREATE INDEX IF NOT EXISTS event_queue ON events(status,next_attempt_at);
     CREATE INDEX IF NOT EXISTS event_history_event ON event_history(event_id,id);
     CREATE INDEX IF NOT EXISTS enrichment_attempts_event ON enrichment_attempts(event_id,id);
@@ -78,21 +80,37 @@ export class EventStore {
       this.db.exec('ALTER TABLE events ADD COLUMN enrichment_status TEXT');
     if (!columns.some(column => column.name === 'actual_transaction_id'))
       this.db.exec('ALTER TABLE events ADD COLUMN actual_transaction_id TEXT');
+    if (!columns.some(column => column.name === 'import_identity_revision'))
+      this.db.exec(
+        'ALTER TABLE events ADD COLUMN import_identity_revision INTEGER NOT NULL DEFAULT 0',
+      );
     this.backfillAudit();
   }
   enqueue(input: SmsInput): { id: string; duplicate: boolean } {
     return this.db.transaction(() => this.enqueueInTransaction(input))();
   }
   private enqueueInTransaction(input: SmsInput): { id: string; duplicate: boolean } {
+    const legacyKey = `hash:${createHash('sha256')
+      .update(`${normalizeText(input.sender ?? '').toLowerCase()}\n${normalizeText(input.message)}`)
+      .digest('hex')}`;
     const key = input.eventId
       ? `tasker:${input.eventId}`
-      : `hash:${createHash('sha256')
-          .update(
-            `${normalizeText(input.sender ?? '').toLowerCase()}\n${normalizeText(input.message)}`,
-          )
+      : `hash-v2:${createHash('sha256')
+          .update(`${legacyKey}\n${new Date(input.receivedAt).toISOString()}`)
           .digest('hex')}`;
-    const old = this.db.prepare('SELECT id FROM events WHERE dedupe_key=?').get(key) as
+    let old = this.db.prepare('SELECT id FROM events WHERE dedupe_key=?').get(key) as
       { id: string } | undefined;
+    if (!old && !input.eventId) {
+      const legacy = this.db
+        .prepare('SELECT id,payload FROM events WHERE dedupe_key=?')
+        .get(legacyKey) as { id: string; payload: string | null } | undefined;
+      if (
+        legacy?.payload &&
+        new Date((JSON.parse(legacy.payload) as SmsInput).receivedAt).getTime() ===
+          new Date(input.receivedAt).getTime()
+      )
+        old = legacy;
+    }
     if (old) {
       const event = this.get(old.id)!;
       this.insertHistory(old.id, event.status, event.status, { duplicateSubmission: true });
@@ -102,7 +120,7 @@ export class EventStore {
       now = new Date().toISOString();
     this.db
       .prepare(
-        'INSERT INTO events(id,dedupe_key,status,payload,next_attempt_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',
+        'INSERT INTO events(id,dedupe_key,status,payload,next_attempt_at,created_at,updated_at,import_identity_revision) VALUES(?,?,?,?,?,?,?,1)',
       )
       .run(id, key, 'queued', JSON.stringify(input), now, now, now);
     this.insertHistory(id, null, 'queued', { input });
@@ -195,6 +213,41 @@ export class EventStore {
   }
   get(id: string): StoredEvent | undefined {
     return this.db.prepare('SELECT * FROM events WHERE id=?').get(id) as StoredEvent | undefined;
+  }
+  legacyImportEvents(): StoredEvent[] {
+    return this.db
+      .prepare(
+        'SELECT * FROM events WHERE import_identity_revision=0 AND parsed IS NOT NULL ORDER BY created_at,rowid',
+      )
+      .all() as StoredEvent[];
+  }
+  completeImportIdentityMigration() {
+    this.db
+      .prepare('UPDATE events SET import_identity_revision=1 WHERE import_identity_revision=0')
+      .run();
+  }
+  seedImportId(eventId: string, part: string, id: string) {
+    this.db
+      .prepare('INSERT OR IGNORE INTO event_import_ids VALUES(?,?,?,?)')
+      .run(eventId, part, id, id);
+  }
+  reserveImportId(eventId: string, part: string, legacyId: string): string {
+    return this.db.transaction(() => {
+      const existing = this.db
+        .prepare('SELECT imported_id FROM event_import_ids WHERE event_id=? AND part=?')
+        .get(eventId, part) as { imported_id: string } | undefined;
+      if (existing) return existing.imported_id;
+      const collision = this.db
+        .prepare('SELECT 1 FROM event_import_ids WHERE legacy_id=? LIMIT 1')
+        .get(legacyId);
+      const id = collision
+        ? `${legacyId}:${createHash('sha256').update(eventId).digest('hex')}`
+        : legacyId;
+      this.db
+        .prepare('INSERT INTO event_import_ids VALUES(?,?,?,?)')
+        .run(eventId, part, legacyId, id);
+      return id;
+    })();
   }
   claim(): StoredEvent | undefined {
     const tx = this.db.transaction(() => {
@@ -311,9 +364,12 @@ export class EventStore {
   ): { event_id: string; source_alias: string }[] {
     return this.db
       .prepare(
-        'SELECT event_id,source_alias FROM transfers WHERE event_id<>? AND source_alias<>? AND principal_cents=? AND julianday(occurred_at) BETWEEN julianday(?) - 15.0 / 1440 AND julianday(?) + 15.0 / 1440 AND matched_event_id IS NULL ORDER BY ABS(julianday(occurred_at)-julianday(?))',
+        'SELECT event_id,source_alias FROM transfers WHERE event_id<>? AND source_alias<>? AND principal_cents=? AND julianday(occurred_at) BETWEEN julianday(?) - 15.0 / 1440 AND julianday(?) + 15.0 / 1440 AND (matched_event_id IS NULL OR matched_event_id=?) ORDER BY ABS(julianday(occurred_at)-julianday(?))',
       )
-      .all(eventId, alias, -amount, at, at, at) as { event_id: string; source_alias: string }[];
+      .all(eventId, alias, -amount, at, at, eventId, at) as {
+      event_id: string;
+      source_alias: string;
+    }[];
   }
   recordTransfer(
     eventId: string,

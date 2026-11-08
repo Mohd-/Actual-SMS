@@ -22,7 +22,7 @@ export async function runtimeFixture() {
     initialize: async () => {},
     shutdown: async () => {},
     sync: async () => {},
-    serverVersion: async () => '26.5.2',
+    serverVersion: async () => '26.11.0',
     accounts: async () => [{ id: 'checking', name: 'Checking' }],
     categories: async () => [{ id: 'fees', name: 'Fees' }],
     transactions: async () => [],
