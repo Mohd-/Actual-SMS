@@ -53,7 +53,10 @@ describe('account routing', () => {
     ['SAB online Card **4187 Amount SAR 1 at Example Store on 2026-08-22 10:05', 'sab-checking'],
     ['SAB refund account **101 amount SAR 1 at Example Store on 2026-08-22 10:05', 'sab-checking'],
     ['SAB refund account **202 amount SAR 1 at Example Store on 2026-08-22 10:05', 'payroll'],
-    ['SAB outgoing transfer account **5202 amount SAR 1 to SampleLedger2 on 2026-08-22 10:05', 'payroll'],
+    [
+      'SAB outgoing transfer account **5202 amount SAR 1 to SampleLedger2 on 2026-08-22 10:05',
+      'payroll',
+    ],
     ['SAB transfer received From: 4101 To: 5202 Amount SAR 1 on 2026-08-22 10:05', 'payroll'],
     ['SAB ATM withdrawal account **4187 amount SAR 1 on 2026-08-22 10:05', 'sab-checking'],
     ['SAB ATM withdrawal account **202 amount SAR 1 on 2026-08-22 10:05', 'payroll'],
