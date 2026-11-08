@@ -71,19 +71,62 @@ reporting now resolves the checkout relative to its script; cron can set
 
 The parser excludes merchant values when recognizing notification and transaction
 markers. A merchant containing `OTP`, `ATM`, or `Reversal` cannot change a purchase's
-direction. Import dates use the banking timezone, `Asia/Riyadh`, independently of
-the container's timezone.
+direction. Import dates preserve the parsed timestamp's offset independently of
+the container's timezone; bank-local timestamps are parsed in `Asia/Riyadh`.
 
 All Actual import results, including principal and fee writes, are checked for
 errors. A matching transfer notification waits while its counterpart's import or
 sync is incomplete. Retry and restart preserve the chosen import IDs and transfer
-pairing, including an independently imported opposite side.
+pairing, including an independently imported opposite side. All new dispatches,
+including ordinary purchases, persist a versioned frozen account/payload/import-ID
+plan in `import_executions` before writing. Identity reservations and execution
+intent commit together. Successful main/principal/fee stages are retained separately;
+counterpart notifications
+wait without spending retry attempts. An exhausted owner fails its dependent
+notification visibly rather than allowing another principal import.
+
+The additive `import-execution:1` migration copies existing frozen transfer plans,
+progress, completed matches, and holds into `import_executions` atomically. The
+old `transfer_executions` table is retained as migration evidence, not consulted as
+a second dispatch authority. Previously parsed, unimported ordinary transactions
+without a trustworthy plan are held too: they may already have written without
+returning an Actual ID. This extends the existing `transfer-execution:1` safeguards;
+it does not replay completed imports or reconstruct write plans from current routing.
+
+New transfer plans retain original endpoint evidence. Counterpart recognition runs
+before current account routing: editing or removing either route cannot authorize
+another linked principal for an already-covered notification. Amount/time proximity
+alone is insufficient to match. Multiple plausible counterparts, inconsistent
+endpoints, and relevant legacy plans lacking endpoint evidence fail closed for
+reconciliation. Potentially related notifications near uncertain legacy transfers
+also fail closed within the existing amount/time window. Reconcile these cases before cutover where
+possible; otherwise preserve their failed status and evidence until both ledger
+and queue have been deliberately reconciled. Do not clear holds or delete execution
+records just to force another attempt. See [transfer recovery](docs/management.md#recover-incomplete-transfers).
 
 The first transaction with a historical fingerprint retains the historical Actual
 import ID. Later distinct events with that fingerprint receive a durable event-based
 suffix. Pre-upgrade parsed events, including partially imported failures, reserve
-their historical IDs before new work runs. Keep the `event_import_ids` table with
-the queue. This depends on stable source event IDs and the original durable queue;
+their historical IDs before new work runs. Identity preparation runs only after
+Actual configuration resolves and while the work gate remains exclusive. Initial
+connection outages leave it pending; reconnect prepares identities before imports
+resume. Each event is marked prepared only in the transaction that reserves its
+identities. Unresolved historical dependencies keep readiness false and block queue
+claims. Never-parsed legacy rows do not receive fabricated fingerprints.
+
+On upgrade, already-marked parsed rows lacking reservations and a trustworthy plan
+or completed counterpart record are recorded in `import_identity_holds`. They may
+have been affected by the earlier outage-startup bug. Readiness stays false; the
+service does not reset their migration flags or invent IDs from current routing.
+Compare historical configuration, queue/audit evidence, and the Actual ledger on a
+private backup before any deliberate repair. Even supplying a reservation later
+does not automatically clear a recorded hold. Preserve all existing identities and
+reconcile any later colliding imports as well. Do not blanket-reset migration flags,
+delete holds, or replay messages as a diagnostic shortcut.
+
+Keep `event_import_ids`, `import_executions`, `import_identity_holds`, the legacy
+`transfer_executions`, and `transfers` with the queue and audit history. This depends
+on stable source event IDs and the original durable queue;
 changing ingestion sources or replaying notifications under new IDs can duplicate
 transactions. A missing queue cannot reconstruct those identities from SMS alone.
 
@@ -102,7 +145,10 @@ and authenticated audit access, then resume the existing phone project. Review
 replayed events and transfer failures before rewinding the inbox.
 
 The schema additions are additive, but the old processor does not understand the
-new identity and pending-transfer safeguards. An image-only downgrade can conflate
+new identity and pending-transfer safeguards, including frozen execution plans and
+legacy reconciliation holds. Drain or explicitly reconcile pending ordinary and transfer dispatches before
+a downgrade; disabling management on the current image keeps those safeguards.
+An image-only downgrade can conflate
 new equal transactions or mishandle incomplete transfers. For rollback, stop the
 new processor and reconcile any Actual writes before restoring a pre-cutover queue
 and cache snapshot. Restoring SQLite does not undo transactions already synced to

@@ -7,13 +7,13 @@ import type {
   SmsInput,
   AiSuggestion,
 } from './types.js';
-import { EventStore, type StoredEvent } from './db.js';
+import { EventStore, type StoredEvent, type ImportExecution } from './db.js';
 import { PARSER_REVISION, parseSms } from './parser.js';
 import { resolveAccount, resolveBillPaymentAccount, resolveTransferAccount } from './routing.js';
 import { MerchantResolver, merchantKey } from './merchant-resolver.js';
-import { importId, migrateImportIdentities } from './import-identity.js';
-import type { ActualTransaction } from './types.js';
+import { importId } from './import-identity.js';
 import { WorkGate } from './work-gate.js';
+import { recognizeTransfer, type TransferRecognition } from './transfer-matching.js';
 
 const retryMs = [60_000, 300_000, 1_800_000, 7_200_000];
 export class Processor {
@@ -31,7 +31,6 @@ export class Processor {
     merchantResolver?: MerchantResolver,
     private gate = new WorkGate(),
   ) {
-    migrateImportIdentities(store, config);
     this.merchantResolver =
       merchantResolver ?? new MerchantResolver(store, actual, config, minConfidence);
   }
@@ -84,19 +83,49 @@ export class Processor {
       release();
     }
   }
-  private async importTransactions(
-    eventId: string,
-    accountId: string,
-    transactions: ActualTransaction[],
-    principal = true,
-  ) {
-    const result = await this.actual.importTransactions(accountId, transactions);
-    const actualTransactionId = result.added[0] ?? result.updated[0];
-    if (principal && actualTransactionId)
-      this.store.update(eventId, 'processing', { actualTransactionId });
-    if (result.errors.length) throw new Error(result.errors.map(error => error.message).join('; '));
+  private async resumeImport(event: StoredEvent, execution: ImportExecution) {
+    const plan = execution.plan;
+    if (!plan) {
+      this.store.update(event.id, 'failed', {
+        error: 'Historical import has uncertain writes; operator reconciliation required',
+      });
+      return;
+    }
+    if (plan.version !== 1)
+      throw new Error('Unsupported import execution version; reconciliation required');
+    if (!execution.complete) {
+      for (const part of ['main', 'principal', 'fee'] as const) {
+        const transaction = plan[part];
+        const done = {
+          main: execution.mainDone,
+          principal: execution.principalDone,
+          fee: execution.feeDone,
+        };
+        if (!transaction || done[part]) continue;
+        const result = await this.actual.importTransactions(plan.accountId, [transaction]);
+        this.store.importProgress(
+          event.id,
+          part,
+          result.errors.length === 0,
+          result.added[0] ?? result.updated[0],
+        );
+        if (result.errors.length)
+          throw new Error(result.errors.map(error => error.message).join('; '));
+      }
+      await this.actual.sync();
+      this.store.completeImport(event.id, plan);
+    } else this.store.update(event.id, plan.review ? 'imported_review' : 'imported');
+  }
+  private waitForTransfer(event: StoredEvent, ownerId: string) {
+    const owner = this.store.get(ownerId)!;
+    this.store.update(event.id, owner.status === 'failed' ? 'failed' : 'queued', {
+      error: `Transfer counterpart ${owner.id} has not completed; awaiting its import and sync or operator reconciliation`,
+      nextAttemptAt: new Date(Date.now() + 60_000).toISOString(),
+    });
   }
   private async process(event: StoredEvent) {
+    const execution = this.store.importExecution(event.id);
+    if (execution) return this.resumeImport(event, execution);
     const input = JSON.parse(event.payload!) as SmsInput;
     const result = parseSms(
       input.message,
@@ -117,7 +146,46 @@ export class Processor {
       return;
     }
     const tx = result.transaction;
-    const account = resolveAccount(this.config.accounts, tx);
+    const isTransfer = ['transfer_in', 'transfer_out', 'card_payment'].includes(tx.kind);
+    let recognition: TransferRecognition = { type: 'unrelated' };
+    if (isTransfer && tx.amountCents !== null) {
+      const legacyConflict = this.store.legacyTransferConflict(tx);
+      if (legacyConflict) return this.waitForTransfer(event, legacyConflict);
+      recognition = recognizeTransfer(
+        tx,
+        this.store
+          .findTransferCounterparts(event.id, tx.principalCents ?? tx.amountCents, tx.occurredAt)
+          .map(candidate => {
+            const plan = this.store.importExecution(candidate.event_id)?.plan ?? null;
+            return {
+              eventId: candidate.event_id,
+              plan,
+              prior:
+                plan?.parsed ??
+                (JSON.parse(this.store.get(candidate.event_id)!.parsed!) as ParsedTransaction),
+            };
+          }),
+      );
+      if (recognition.type === 'hold') {
+        this.store.update(event.id, 'failed', {
+          parsed: tx,
+          parserRevision: PARSER_REVISION,
+          error: recognition.reason,
+        });
+        return;
+      }
+      if (
+        recognition.type === 'matched' &&
+        !['imported', 'imported_review'].includes(
+          this.store.get(recognition.candidate.eventId)!.status,
+        )
+      )
+        return this.waitForTransfer(event, recognition.candidate.eventId);
+    }
+    const counterpart = recognition.type === 'matched' ? recognition.candidate : undefined;
+    const account =
+      (recognition.type === 'matched' ? recognition.account : undefined) ??
+      resolveAccount(this.config.accounts, tx);
     if (!account)
       throw new Error(
         `Unmapped account route: ${tx.bank}${tx.accountAlias ? ` suffix ${tx.accountAlias}` : ''}`,
@@ -140,7 +208,6 @@ export class Processor {
       review = true;
     }
     this.store.update(event.id, 'processing', { parsed: tx, parserRevision: PARSER_REVISION });
-    const isTransfer = ['transfer_in', 'transfer_out', 'card_payment'].includes(tx.kind);
     let suggestion: AiSuggestion | null = null;
     let selectedPayee = tx.payee;
     let selectedCategory: string | undefined;
@@ -217,58 +284,30 @@ export class Processor {
       .join(' | ');
     const id = (part = 'main') => importId(this.store, event, tx, account.key, part);
     if (isTransfer) {
-      const counterpart = this.store
-        .findTransferCounterparts(
-          event.id,
-          account.key,
-          tx.principalCents ?? tx.amountCents,
-          tx.occurredAt,
-        )
-        .find(candidate => {
-          const prior = JSON.parse(
-            this.store.get(candidate.event_id)!.parsed!,
-          ) as ParsedTransaction;
-          if (!['transfer_in', 'transfer_out', 'card_payment'].includes(prior.kind)) return false;
-          const targetOf = (value: ParsedTransaction) =>
-            value.billPaymentIdentifier
-              ? resolveBillPaymentAccount(this.config.accounts, value.billPaymentIdentifier)
-              : value.transferCounterpartyAlias
-                ? resolveTransferAccount(this.config.accounts, value.transferCounterpartyAlias)
-                : undefined;
-          const currentTarget = targetOf(tx);
-          const priorTarget = targetOf(prior);
-          if (currentTarget && currentTarget.key !== candidate.source_alias) return false;
-          if (priorTarget && priorTarget.key !== account.key) return false;
-          return currentTarget !== undefined || priorTarget !== undefined;
-        });
-      if (
-        counterpart &&
-        !['imported', 'imported_review'].includes(this.store.get(counterpart.event_id)!.status)
-      )
-        throw new Error(
-          'Transfer counterpart has not completed; retrying after its import and sync',
-        );
-      const counterpartTx = counterpart
-        ? (JSON.parse(this.store.get(counterpart.event_id)!.parsed!) as ParsedTransaction)
-        : undefined;
-      const counterpartTarget = counterpartTx
-        ? counterpartTx.billPaymentIdentifier
-          ? resolveBillPaymentAccount(this.config.accounts, counterpartTx.billPaymentIdentifier)
-          : counterpartTx.transferCounterpartyAlias
-            ? resolveTransferAccount(this.config.accounts, counterpartTx.transferCounterpartyAlias)
-            : undefined
-        : undefined;
-      if (counterpart && counterpartTarget) {
-        this.store.recordTransfer(
-          event.id,
-          account.key,
-          tx.transferCounterpartyAlias,
-          tx.principalCents ?? tx.amountCents,
-          tx.occurredAt,
-          counterpart.event_id,
-        );
-        this.store.update(event.id, 'imported');
-        return;
+      if (recognition.type === 'matched' && recognition.coversPrincipal) {
+        const planned = this.store.beginImport(event.id, () => ({
+          version: 1,
+          kind: 'transfer',
+          accountId: account.id,
+          sourceKey: account.key,
+          targetKey: counterpart!.plan!.sourceKey,
+          endpoints: { source: account, target: counterpart!.plan!.endpoints!.source },
+          parsed: tx,
+          principalCents: tx.principalCents ?? tx.amountCents!,
+          fee: tx.feeCents
+            ? {
+                date,
+                amount: -tx.feeCents,
+                payee_name: 'Bank Fees',
+                category: this.config.bankFeesCategoryId,
+                notes,
+                imported_id: id('fee'),
+              }
+            : undefined,
+          review,
+          matchedEventId: counterpart!.eventId,
+        }));
+        return this.resumeImport(event, planned);
       }
       // A counterpart already imported without a transfer payee covers only
       // its own account. Import this side independently to avoid crediting
@@ -280,76 +319,63 @@ export class Processor {
           : tx.transferCounterpartyAlias
             ? resolveTransferAccount(this.config.accounts, tx.transferCounterpartyAlias)
             : undefined;
-      if (target) {
-        const payee = await this.actual.transferPayee(target.id);
-        const principal =
-          tx.principalCents ?? (tx.amountCents < 0 ? tx.amountCents + tx.feeCents : tx.amountCents);
-        this.store.recordTransfer(
-          event.id,
-          account.key,
-          tx.transferCounterpartyAlias,
-          principal,
-          tx.occurredAt,
-        );
-        await this.importTransactions(event.id, account.id, [
-          {
-            date,
-            amount: principal,
-            payee,
-            notes,
-            imported_id: id('principal'),
-          },
-        ]);
-        if (tx.feeCents)
-          await this.importTransactions(
-            event.id,
-            account.id,
-            [
-              {
+      const principal = target
+        ? (tx.principalCents ??
+          (tx.amountCents < 0 ? tx.amountCents + tx.feeCents : tx.amountCents))
+        : tx.amountCents;
+      const payee = target ? await this.actual.transferPayee(target.id) : undefined;
+      const planned = this.store.beginImport(event.id, () => ({
+        version: 1,
+        kind: 'transfer',
+        accountId: account.id,
+        sourceKey: account.key,
+        targetKey: target?.key,
+        endpoints: { source: account, target },
+        parsed: tx,
+        principalCents: target ? principal : (tx.principalCents ?? tx.amountCents!),
+        principal: {
+          date,
+          amount: principal,
+          ...(target ? { payee } : { payee_name: tx.payee }),
+          notes,
+          imported_id: target ? id('principal') : id(),
+        },
+        fee:
+          target && tx.feeCents
+            ? {
                 date,
                 amount: -tx.feeCents,
                 payee_name: 'Bank Fees',
                 category: this.config.bankFeesCategoryId,
                 notes,
                 imported_id: id('fee'),
-              },
-            ],
-            false,
-          );
-      } else {
-        this.store.recordTransfer(
-          event.id,
-          account.key,
-          tx.transferCounterpartyAlias,
-          tx.principalCents ?? tx.amountCents,
-          tx.occurredAt,
-          counterpart?.event_id,
-        );
-        await this.importTransactions(event.id, account.id, [
-          {
-            date,
-            amount: tx.amountCents,
-            payee_name: tx.payee,
-            notes,
-            imported_id: id(),
-          },
-        ]);
-      }
+              }
+            : undefined,
+        review,
+        matchedEventId: counterpart?.eventId,
+      }));
+      return this.resumeImport(event, planned);
     } else {
-      await this.importTransactions(event.id, account.id, [
-        {
+      const planned = this.store.beginImport(event.id, () => ({
+        version: 1,
+        kind: 'ordinary',
+        accountId: account.id,
+        sourceKey: account.key,
+        parsed: tx,
+        principalCents: tx.amountCents!,
+        review,
+        main: {
           date,
-          amount: tx.amountCents,
+          amount: tx.amountCents!,
           payee_name: selectedPayee,
           imported_payee: tx.payee,
           category: selectedCategory,
           notes,
           imported_id: id(),
         },
-      ]);
+      }));
+      return this.resumeImport(event, planned);
     }
-    await this.actual.sync();
-    this.store.update(event.id, review ? 'imported_review' : 'imported');
   }
 }
 

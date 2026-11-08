@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Runtime } from './runtime.js';
-import { configRevision, readConfigFiles, resolveConfig } from './runtime-config.js';
+import { configRevision, readConfigFiles } from './runtime-config.js';
 
 export class ConfigConflict extends Error {
   constructor() {
@@ -38,18 +38,18 @@ export class ConfigEditor {
     };
   }
   async preview(accounts: string, expected: string) {
-    return this.runtime.withConfiguration(async () => {
+    return this.runtime.withConfiguration(async validate => {
       const current = await this.read();
       if (current.revision !== expected) throw new ConfigConflict();
-      await resolveConfig({ ...current, accounts }, this.runtime.actual);
+      await validate({ ...current, accounts });
       return { valid: true, revision: expected };
     });
   }
   async reload(expected: string) {
-    return this.runtime.withConfiguration(async () => {
+    return this.runtime.withConfiguration(async validate => {
       const current = await this.read();
       if (current.revision !== expected) throw new ConfigConflict();
-      const snapshot = await resolveConfig(current, this.runtime.actual);
+      const snapshot = await validate(current);
       if ((await this.read()).revision !== expected) throw new ConfigConflict();
       this.runtime.activate(current, snapshot);
       return this.read();
@@ -57,12 +57,12 @@ export class ConfigEditor {
   }
   async save(accounts: string, expected: string) {
     if (!this.editable) throw new Error('Configuration is read-only');
-    return this.runtime.withConfiguration(async () => {
+    return this.runtime.withConfiguration(async validate => {
       const current = await this.read();
       if (!current.editable) throw new Error('Configuration directory is read-only');
       if (current.revision !== expected) throw new ConfigConflict();
       const candidate = { accounts, banks: current.banks, parsing: current.parsing };
-      const snapshot = await resolveConfig(candidate, this.runtime.actual);
+      const snapshot = await validate(candidate);
       const info = await this.checkPath();
       if ((await this.read()).revision !== expected) throw new ConfigConflict();
       const path = this.runtime.paths.accounts;

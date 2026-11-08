@@ -105,7 +105,8 @@ describe('processor enrichment', () => {
       const { store, imported, processor, id } = setup(suggestion);
       await processor.tick();
 
-      expect(imported[0]).toMatchObject({ payee_name: 'Sample Books', category });
+      expect(imported[0]).toMatchObject({ payee_name: 'Sample Books' });
+      expect(imported[0]?.category).toBe(category);
       expect(JSON.parse(store.get(id)!.suggestion!)).toEqual(suggestion);
     },
   );
@@ -115,7 +116,8 @@ describe('processor enrichment', () => {
     await processor.tick();
 
     expect(store.get(id)?.status).toBe('imported');
-    expect(imported[0]).toMatchObject({ payee_name: 'Example Store', category: undefined });
+    expect(imported[0]).toMatchObject({ payee_name: 'Example Store' });
+    expect(imported[0]?.category).toBeUndefined();
     expect(store.enrichmentAttempts(id).at(-1)?.status).toBe('llm_network_error');
   });
 

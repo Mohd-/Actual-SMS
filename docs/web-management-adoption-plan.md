@@ -2,7 +2,7 @@
 
 Status: phases 1–5 implemented on `feat/narrow-web-management`; phase 6 remains gated and manual approval is disabled.
 
-Audience: maintainers implementing and reviewing the adoption. This document records the agreed design and acceptance criteria; see [Browser management](management.md) for implemented deployment and operation instructions. The implementation uses a small TypeScript browser application and locally provisioned password/session credentials rather than public owner registration. Fastify is updated within major version 5 to address published HTTP/authentication advisories; the Actual API pin and Node 20 production runtime are unchanged.
+Audience: maintainers implementing and reviewing the adoption. This document records the agreed design and acceptance criteria; see [Browser management](management.md) for implemented deployment and operation instructions. The implementation uses a small TypeScript browser application and locally provisioned password/session credentials rather than public owner registration. Fastify is updated within major version 5 to address published HTTP/authentication advisories. The original adoption targeted Node 20 / Actual API 26.5.2; this branch now integrates the independently upgraded upstream Node 22 / exact Actual API 26.11.0 baseline. See [runtime alignment](../MIGRATION.md#runtime-alignment-discovered-during-live-validation).
 
 ## Objective
 
@@ -46,7 +46,7 @@ The comparison baseline is upstream `0f80d1b` and fork `1081055`. Their historie
 5. **Privacy does not depend on UI enablement.** Unsupported-sender inbox content is still discarded. Raw SMS and location remain restricted to authenticated detail views, not summary lists or logs.
 6. **Actual objects already exist.** Accounts and categories must resolve to existing valid objects; the service never creates them. Startup configuration errors, including missing or ambiguous configured names, remain hard failures rather than silently dropping mappings.
 7. **The web layer is optional.** Existing CLI/environment/YAML deployments and ingestion routes continue to work without browser setup or writable configuration.
-8. **Compatibility changes stay separate.** Keep the exact `@actual-app/api` pin at `26.5.2` for this adoption. A necessary runtime or dependency upgrade needs its own justification, compatibility checks, and review.
+8. **Compatibility changes stay separate.** Preserve the integrated upstream Node 22 / exact `@actual-app/api` pin at `26.11.0` for this adoption. The original `26.5.2` target was superseded by the separately documented upstream runtime alignment, not by management functionality. Further runtime or dependency upgrades need their own justification, compatibility checks, and review.
 
 ## 2. Ownership and module responsibilities
 

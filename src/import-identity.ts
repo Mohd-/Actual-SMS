@@ -24,17 +24,33 @@ export function legacyImportId(tx: ParsedTransaction, accountKey: string, part =
 }
 
 export function migrateImportIdentities(store: EventStore, config: ResolvedConfig) {
+  const hold = store.importIdentityHold();
+  if (hold)
+    throw new Error(
+      `Historical identity reservation missing for ${hold}; operator reconciliation required`,
+    );
   store.db.transaction(() => {
     for (const event of store.legacyImportEvents()) {
-      const tx = JSON.parse(event.parsed!) as ParsedTransaction;
+      if (!event.parsed) {
+        if (event.actual_transaction_id)
+          throw new Error(
+            `Historical write evidence without parsed data for ${event.id}; reconciliation required`,
+          );
+        store.completeImportIdentityMigration(event.id);
+        continue;
+      }
+      const tx = JSON.parse(event.parsed) as ParsedTransaction;
       const account = resolveAccount(config.accounts, tx);
-      if (!account && !tx.accountAlias) continue;
+      if (!account && !tx.accountAlias)
+        throw new Error(
+          `Historical identity unresolved for ${event.id}; imports paused for reconciliation`,
+        );
       for (const part of ['main', 'principal', 'fee']) {
         const id = legacyImportId(tx, account?.key ?? '', part);
         store.seedImportId(event.id, part, id);
       }
+      store.completeImportIdentityMigration(event.id);
     }
-    store.completeImportIdentityMigration();
   })();
 }
 

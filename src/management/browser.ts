@@ -10,11 +10,17 @@ const errorBox = element('error');
 let config: ConfigView | undefined;
 let checkpoint: InboxCheckpoint | null = null;
 let nextCursor: string | undefined;
-let previewed = false;
+let preview: { accounts: string; revision: string } | undefined;
+let editGeneration = 0;
+let loadGeneration = 0;
+let loading = false;
+let saving = false;
+let previewPending = false;
 function signedOut() {
   element('login').hidden = false;
   element('workspace').hidden = true;
   element<HTMLInputElement>('tasker-key').value = '';
+  invalidate();
 }
 async function request<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(`/management/${path}`, {
@@ -56,26 +62,53 @@ async function status() {
   text('status-data', await request<StatusView>('status'));
 }
 async function loadConfig() {
-  config = await request<ConfigView>('config');
-  element<HTMLTextAreaElement>('accounts').value = config.accounts;
-  element<HTMLTextAreaElement>('accounts').readOnly = !config.editable;
-  element<HTMLButtonElement>('preview').disabled = !config.editable;
-  text('banks', config.banks);
-  text('parsing', config.parsing);
-  text('config-state', {
-    editable: config.editable,
-    persistedRevision: config.revision,
-    activeRevision: config.activeRevision,
-    pending: config.revision !== config.activeRevision,
-  });
+  if (saving) return;
+  const generation = ++loadGeneration;
+  loading = true;
   invalidate();
+  try {
+    const loaded = await request<ConfigView>('config');
+    if (generation !== loadGeneration) return;
+    config = loaded;
+    element<HTMLTextAreaElement>('accounts').value = config.accounts;
+    text('banks', config.banks);
+    text('parsing', config.parsing);
+    text('config-state', {
+      editable: config.editable,
+      persistedRevision: config.revision,
+      activeRevision: config.activeRevision,
+      pending: config.revision !== config.activeRevision,
+    });
+    invalidate();
+  } finally {
+    if (generation === loadGeneration) loading = false;
+    updateSave();
+  }
+}
+function previewMatches() {
+  return (
+    preview &&
+    preview.revision === config?.revision &&
+    preview.accounts === element<HTMLTextAreaElement>('accounts').value
+  );
 }
 function updateSave() {
+  const busy = loading || saving;
+  element<HTMLTextAreaElement>('accounts').readOnly = busy || !config?.editable;
+  element<HTMLButtonElement>('preview').disabled = busy || previewPending || !config?.editable;
+  for (const id of ['config-load', 'config-reload', 'confirm-save'])
+    element<HTMLInputElement | HTMLButtonElement>(id).disabled = busy;
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-page="config"]'))
+    button.disabled = busy;
   element<HTMLButtonElement>('save').disabled =
-    !config?.editable || !previewed || !element<HTMLInputElement>('confirm-save').checked;
+    busy ||
+    !config?.editable ||
+    !previewMatches() ||
+    !element<HTMLInputElement>('confirm-save').checked;
 }
 function invalidate() {
-  previewed = false;
+  editGeneration++;
+  preview = undefined;
   element('diff').hidden = true;
   element<HTMLInputElement>('confirm-save').checked = false;
   updateSave();
@@ -176,21 +209,52 @@ action('config-reload', async () => {
 element('accounts').addEventListener('input', invalidate);
 element('confirm-save').addEventListener('change', updateSave);
 action('preview', async () => {
-  if (!config) return;
-  const accounts = element<HTMLTextAreaElement>('accounts').value;
-  await request('config/preview', { accounts, revision: config.revision });
-  text('before', config.accounts);
-  text('after', accounts);
-  element('diff').hidden = false;
-  previewed = true;
-});
-action('save', async () => {
-  if (!config || !previewed || !element<HTMLInputElement>('confirm-save').checked) return;
-  await request('config/save', {
+  if (!config || loading || saving) return;
+  invalidate();
+  const generation = editGeneration;
+  const candidate = {
     accounts: element<HTMLTextAreaElement>('accounts').value,
     revision: config.revision,
-    confirmation: 'SAVE',
-  });
+  };
+  const before = config.accounts;
+  previewPending = true;
+  updateSave();
+  try {
+    await request('config/preview', candidate);
+    if (
+      generation !== editGeneration ||
+      candidate.revision !== config?.revision ||
+      candidate.accounts !== element<HTMLTextAreaElement>('accounts').value
+    )
+      return;
+    text('before', before);
+    text('after', candidate.accounts);
+    element('diff').hidden = false;
+    preview = candidate;
+  } finally {
+    previewPending = false;
+    updateSave();
+  }
+});
+action('save', async () => {
+  if (
+    !config ||
+    !preview ||
+    !previewMatches() ||
+    loading ||
+    saving ||
+    !element<HTMLInputElement>('confirm-save').checked
+  )
+    return;
+  const confirmed = preview;
+  saving = true;
+  updateSave();
+  try {
+    await request('config/save', { ...confirmed, confirmation: 'SAVE' });
+  } finally {
+    saving = false;
+    invalidate();
+  }
   await loadConfig();
 });
 action('rotate', async () => {

@@ -146,7 +146,7 @@ describe('processor transfer routing', () => {
     expect(imported[0]!.transactions[0]!.date).toBe('2026-08-22');
   });
 
-  it('records principal success when the fee fails and retries both stable identities', async () => {
+  it('records principal success when the fee fails and retries only the outstanding fee identity', async () => {
     const { store, processor, actual, imported } = setup();
     const write = actual.importTransactions;
     let fail = true;
@@ -171,7 +171,8 @@ describe('processor transfer routing', () => {
     fail = false;
     store.update(id, 'queued', { nextAttemptAt: new Date().toISOString() });
     await processor.tick();
-    expect(imported.slice(2).map(i => i.transactions[0]!.imported_id)).toEqual(ids);
+    expect(imported.slice(2).map(i => i.transactions[0]!.imported_id)).toEqual([ids[1]]);
+    expect(store.importExecution(id)?.plan?.principal?.imported_id).toBe(ids[0]);
     expect(store.get(id)?.status).toBe('imported');
   });
   it.each([
@@ -188,7 +189,7 @@ describe('processor transfer routing', () => {
     await processor.tick();
     expect(store.get(id)).toMatchObject({ status: 'queued', error: 'Rejected' });
   });
-  it('retries a sync failure after a successful write without changing its import ID', async () => {
+  it('retries sync after a successful write without reissuing the completed principal', async () => {
     const { store, processor, actual, imported } = setup();
     let fail = true;
     actual.sync = async () => {
@@ -200,9 +201,11 @@ describe('processor transfer routing', () => {
     fail = false;
     store.update(id, 'queued', { nextAttemptAt: new Date().toISOString() });
     await processor.tick();
-    expect(imported[1]!.transactions[0]!.imported_id).toBe(
+    expect(imported).toHaveLength(1);
+    expect(store.importExecution(id)?.plan?.principal?.imported_id).toBe(
       imported[0]!.transactions[0]!.imported_id,
     );
+    expect(store.get(id)?.status).toBe('imported');
   });
 
   it('imports a salary transfer into the account named by its To field', async () => {

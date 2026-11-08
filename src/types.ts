@@ -96,6 +96,24 @@ export interface ActualTransaction {
   imported_id: string;
   cleared?: boolean;
 }
+/** Versioned write intent, retained unchanged across retries and restarts. */
+export interface ImportPlan {
+  version: 1;
+  kind: 'ordinary' | 'transfer';
+  accountId: string;
+  sourceKey: string;
+  targetKey?: string;
+  /** Historical endpoint evidence, never a live routing configuration source. */
+  endpoints?: { source: ResolvedAccount; target?: ResolvedAccount };
+  parsed: ParsedTransaction;
+  principalCents: number;
+  main?: ActualTransaction;
+  /** Absent when a completed counterpart already covers the principal. */
+  principal?: ActualTransaction;
+  fee?: ActualTransaction;
+  review: boolean;
+  matchedEventId?: string;
+}
 export interface ActualCategory {
   id: string;
   name: string;

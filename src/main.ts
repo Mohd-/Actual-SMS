@@ -6,6 +6,7 @@ import { EventStore } from './db.js';
 import { ActualApiAdapter } from './actual.js';
 import { NoopEnricher, OpenCodeGoEnricher } from './enricher.js';
 import { Processor } from './processor.js';
+import { migrateImportIdentities } from './import-identity.js';
 import { buildServer } from './server.js';
 import { Runtime } from './runtime.js';
 import { ConfigurationError, parseConfigFiles, readConfigFiles } from './runtime-config.js';
@@ -42,7 +43,9 @@ const actual = new ActualApiAdapter({
   encryptionPassword: env.ACTUAL_ENCRYPTION_PASSWORD,
   dataDir: env.ACTUAL_CACHE_DIR,
 });
-const runtime = new Runtime(actual, config, paths);
+const runtime = new Runtime(actual, config, paths, snapshot =>
+  migrateImportIdentities(store, snapshot),
+);
 if (maintenancePaused) runtime.beginShutdown();
 try {
   if (!maintenancePaused)

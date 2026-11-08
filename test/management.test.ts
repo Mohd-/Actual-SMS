@@ -49,6 +49,57 @@ export async function managementFixture() {
   return { ...f, store, credentials, app, login };
 }
 describe('optional management authorization', () => {
+  it('reports a failed live validation without claiming a successful config save', async () => {
+    const f = await managementFixture();
+    const cookie = sessionCookie(await f.login());
+    const view = (
+      await f.app.inject({ url: '/management/config', headers: { cookie } })
+    ).json() as { accounts: string; revision: string };
+    f.actual.sync = async () => {
+      throw new Error('private-sync-password');
+    };
+    const response = await f.app.inject({
+      method: 'POST',
+      url: '/management/config/save',
+      headers: { cookie, origin },
+      payload: {
+        accounts: view.accounts.replace('1234', '4321'),
+        revision: view.revision,
+        confirmation: 'SAVE',
+      },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.body).not.toContain('private-sync-password');
+    const persisted = (
+      await f.app.inject({ url: '/management/config', headers: { cookie } })
+    ).json() as { accounts: string; revision: string; activeRevision: string };
+    expect(persisted.accounts).toBe(view.accounts);
+    expect(persisted.revision).toBe(view.revision);
+    expect(persisted.activeRevision).toBe(view.revision);
+    expect((await f.app.inject({ url: '/readyz' })).statusCode).toBe(503);
+    const status = await f.app.inject({ url: '/management/status', headers: { cookie } });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      ready: false,
+      error: expect.stringContaining('Actual synchronization failed'),
+    });
+    expect(status.body).not.toContain('private-sync-password');
+    expect(
+      f.store.db.prepare("SELECT outcome FROM management_audit WHERE action='config.save'").all(),
+    ).toEqual([{ outcome: 'failed' }]);
+    f.actual.sync = async () => {};
+    expect(
+      (
+        await f.app.inject({
+          method: 'POST',
+          url: '/management/config/reload',
+          headers: { cookie, origin },
+          payload: { revision: view.revision },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect((await f.app.inject({ url: '/readyz' })).statusCode).toBe(200);
+  });
   it('requires a browser session and exact origin, not an ingestion key', async () => {
     const { app, login } = await managementFixture();
     expect(

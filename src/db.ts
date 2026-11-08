@@ -6,6 +6,7 @@ import type {
   InboxSyncOutcome,
   InboxSyncRow,
   SmsInput,
+  ImportPlan,
 } from './types.js';
 import { normalizeText, type ParserReason } from './parser.js';
 
@@ -25,6 +26,17 @@ export interface StoredEvent {
   updated_at: string;
   enrichment_status: string | null;
   actual_transaction_id: string | null;
+}
+export interface ImportExecution {
+  /** Null denotes pre-upgrade writes that require operator reconciliation. */
+  plan: ImportPlan | null;
+  mainDone: boolean;
+  mainActualId: string | null;
+  principalDone: boolean;
+  feeDone: boolean;
+  complete: boolean;
+  principalActualId: string | null;
+  feeActualId: string | null;
 }
 export interface MerchantMapping {
   account_id: string;
@@ -84,7 +96,172 @@ export class EventStore {
       this.db.exec(
         'ALTER TABLE events ADD COLUMN import_identity_revision INTEGER NOT NULL DEFAULT 0',
       );
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS events_import_identity_revision ON events(import_identity_revision)',
+    );
     this.backfillAudit();
+    this.migrateTransferExecutions();
+    this.migrateImportExecutions();
+  }
+  private migrateTransferExecutions() {
+    this.db.transaction(() => {
+      this.db.exec(`CREATE TABLE IF NOT EXISTS transfer_executions(
+        event_id TEXT PRIMARY KEY,plan TEXT,principal_done INTEGER NOT NULL DEFAULT 0,
+        fee_done INTEGER NOT NULL DEFAULT 0,complete INTEGER NOT NULL DEFAULT 0,
+        principal_actual_id TEXT,fee_actual_id TEXT);`);
+      const key = 'transfer-execution:1';
+      if (this.db.prepare('SELECT 1 FROM service_migrations WHERE key=?').get(key)) return;
+      // A parsed old transfer may have written even when no Actual ID was returned.
+      const uncertain = this.db
+        .prepare(
+          `SELECT id FROM events WHERE status IN ('queued','processing','failed')
+        AND parsed IS NOT NULL AND json_extract(parsed,'$.kind') IN ('transfer_in','transfer_out','card_payment')`,
+        )
+        .all() as { id: string }[];
+      for (const event of uncertain) {
+        this.db
+          .prepare('INSERT OR IGNORE INTO transfer_executions(event_id,plan) VALUES(?,NULL)')
+          .run(event.id);
+        this.update(event.id, 'failed', {
+          error: 'Legacy transfer has uncertain writes; operator reconciliation required',
+        });
+      }
+      this.db
+        .prepare('INSERT INTO service_migrations(key,value) VALUES(?,?)')
+        .run(key, new Date().toISOString());
+    })();
+  }
+  private migrateImportExecutions() {
+    this.db.transaction(() => {
+      this.db.exec(`CREATE TABLE IF NOT EXISTS import_executions(
+        event_id TEXT PRIMARY KEY,plan TEXT,main_done INTEGER NOT NULL DEFAULT 0,
+        principal_done INTEGER NOT NULL DEFAULT 0,fee_done INTEGER NOT NULL DEFAULT 0,
+        complete INTEGER NOT NULL DEFAULT 0,main_actual_id TEXT,principal_actual_id TEXT,fee_actual_id TEXT);
+        CREATE TABLE IF NOT EXISTS import_identity_holds(event_id TEXT PRIMARY KEY);`);
+      const key = 'import-execution:1';
+      if (this.db.prepare('SELECT 1 FROM service_migrations WHERE key=?').get(key)) return;
+      // Transfer storage becomes a read-only migration source, never a second authority.
+      this.db.exec(`INSERT OR IGNORE INTO import_executions(
+        event_id,plan,principal_done,fee_done,complete,principal_actual_id,fee_actual_id)
+        SELECT event_id,CASE WHEN plan IS NULL THEN NULL ELSE json_set(plan,'$.version',1,'$.kind','transfer') END,
+        principal_done,fee_done,complete,principal_actual_id,fee_actual_id FROM transfer_executions`);
+      // The old startup bug marked unresolved rows prepared without reserving IDs.
+      // Preserve those flags and evidence; current routing cannot repair history.
+      this.db.exec(`INSERT OR IGNORE INTO import_identity_holds SELECT e.id FROM events e
+        WHERE e.import_identity_revision=1 AND e.parsed IS NOT NULL
+        AND NOT EXISTS(SELECT 1 FROM event_import_ids i WHERE i.event_id=e.id)
+        AND NOT EXISTS(SELECT 1 FROM import_executions x WHERE x.event_id=e.id AND x.plan IS NOT NULL)
+        AND NOT EXISTS(SELECT 1 FROM transfers t WHERE t.event_id=e.id AND t.matched_event_id IS NOT NULL)`);
+      const uncertain = this.db
+        .prepare(
+          `SELECT id FROM events WHERE status IN ('queued','processing','failed')
+        AND parsed IS NOT NULL AND NOT EXISTS(SELECT 1 FROM import_executions x WHERE x.event_id=events.id)`,
+        )
+        .all() as { id: string }[];
+      for (const event of uncertain) {
+        this.db
+          .prepare('INSERT INTO import_executions(event_id,plan) VALUES(?,NULL)')
+          .run(event.id);
+        this.update(event.id, 'failed', {
+          error: 'Historical import has uncertain writes; operator reconciliation required',
+        });
+      }
+      this.db
+        .prepare('INSERT INTO service_migrations(key,value) VALUES(?,?)')
+        .run(key, new Date().toISOString());
+    })();
+  }
+  legacyTransferConflict(tx: ImportPlan['parsed']) {
+    // Old writes have no trustworthy frozen account. Fail closed within the existing
+    // amount/time window rather than guessing a new route or repairing Actual.
+    const row = this.db
+      .prepare(
+        `SELECT e.id FROM import_executions x JOIN events e ON e.id=x.event_id
+      WHERE x.plan IS NULL AND e.status NOT IN ('imported','imported_review')
+      AND json_extract(e.parsed,'$.kind') IN ('transfer_in','transfer_out','card_payment')
+      AND ABS(COALESCE(json_extract(e.parsed,'$.principalCents'),json_extract(e.parsed,'$.amountCents')))=?
+      AND julianday(json_extract(e.parsed,'$.occurredAt')) BETWEEN julianday(?) - 15.0/1440 AND julianday(?) + 15.0/1440
+      LIMIT 1`,
+      )
+      .get(Math.abs(tx.principalCents ?? tx.amountCents!), tx.occurredAt, tx.occurredAt) as
+      { id: string } | undefined;
+    return row?.id;
+  }
+  importExecution(eventId: string): ImportExecution | undefined {
+    const row = this.db.prepare('SELECT * FROM import_executions WHERE event_id=?').get(eventId) as
+      | {
+          plan: string | null;
+          main_done: number;
+          main_actual_id: string | null;
+          principal_done: number;
+          fee_done: number;
+          complete: number;
+          principal_actual_id: string | null;
+          fee_actual_id: string | null;
+        }
+      | undefined;
+    return row
+      ? {
+          plan: row.plan ? (JSON.parse(row.plan) as ImportPlan) : null,
+          mainDone: Boolean(row.main_done),
+          mainActualId: row.main_actual_id,
+          principalDone: Boolean(row.principal_done),
+          feeDone: Boolean(row.fee_done),
+          complete: Boolean(row.complete),
+          principalActualId: row.principal_actual_id,
+          feeActualId: row.fee_actual_id,
+        }
+      : undefined;
+  }
+  beginImport(eventId: string, build: () => ImportPlan) {
+    this.db.transaction(() => {
+      const plan = build(); // Identity reservations and write intent commit together.
+      this.db
+        .prepare('INSERT INTO import_executions(event_id,plan) VALUES(?,?)')
+        .run(eventId, JSON.stringify(plan));
+      if (plan.kind === 'transfer')
+        // Reservation only: no completed match until all writes and sync succeed.
+        this.recordTransfer(
+          eventId,
+          plan.sourceKey,
+          plan.parsed.transferCounterpartyAlias,
+          plan.principalCents,
+          plan.parsed.occurredAt,
+        );
+    })();
+    return this.importExecution(eventId)!;
+  }
+  importProgress(
+    eventId: string,
+    part: 'main' | 'principal' | 'fee',
+    done: boolean,
+    actualId?: string,
+  ) {
+    const columns = [`${part}_done`, `${part}_actual_id`];
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE import_executions SET ${columns[0]}=?,${columns[1]}=COALESCE(?,${columns[1]}) WHERE event_id=?`,
+        )
+        .run(Number(done), actualId ?? null, eventId);
+      if (part !== 'fee' && actualId)
+        this.update(eventId, 'processing', { actualTransactionId: actualId });
+    })();
+  }
+  completeImport(eventId: string, plan: ImportPlan) {
+    this.db.transaction(() => {
+      this.db.prepare('UPDATE import_executions SET complete=1 WHERE event_id=?').run(eventId);
+      if (plan.kind === 'transfer')
+        this.recordTransfer(
+          eventId,
+          plan.sourceKey,
+          plan.parsed.transferCounterpartyAlias,
+          plan.principalCents,
+          plan.parsed.occurredAt,
+          plan.matchedEventId,
+        );
+      this.update(eventId, plan.review ? 'imported_review' : 'imported');
+    })();
   }
   enqueue(input: SmsInput): { id: string; duplicate: boolean } {
     return this.db.transaction(() => this.enqueueInTransaction(input))();
@@ -216,15 +393,27 @@ export class EventStore {
   }
   legacyImportEvents(): StoredEvent[] {
     return this.db
-      .prepare(
-        'SELECT * FROM events WHERE import_identity_revision=0 AND parsed IS NOT NULL ORDER BY created_at,rowid',
-      )
+      .prepare('SELECT * FROM events WHERE import_identity_revision=0 ORDER BY created_at,rowid')
       .all() as StoredEvent[];
   }
-  completeImportIdentityMigration() {
+  importIdentityHold(): string | undefined {
+    return (
+      this.db.prepare('SELECT event_id FROM import_identity_holds LIMIT 1').get() as
+        { event_id: string } | undefined
+    )?.event_id;
+  }
+  importIdentitiesPrepared(): boolean {
+    return (
+      !this.importIdentityHold() &&
+      !this.db.prepare('SELECT 1 FROM events WHERE import_identity_revision=0 LIMIT 1').get()
+    );
+  }
+  completeImportIdentityMigration(eventId: string) {
     this.db
-      .prepare('UPDATE events SET import_identity_revision=1 WHERE import_identity_revision=0')
-      .run();
+      .prepare(
+        'UPDATE events SET import_identity_revision=1 WHERE id=? AND import_identity_revision=0',
+      )
+      .run(eventId);
   }
   seedImportId(eventId: string, part: string, id: string) {
     this.db
@@ -251,6 +440,7 @@ export class EventStore {
   }
   claim(): StoredEvent | undefined {
     const tx = this.db.transaction(() => {
+      if (!this.importIdentitiesPrepared()) return undefined;
       const e = this.db
         .prepare(
           "SELECT * FROM events WHERE status='queued' AND next_attempt_at<=? ORDER BY created_at, rowid LIMIT 1",
@@ -358,15 +548,14 @@ export class EventStore {
   }
   findTransferCounterparts(
     eventId: string,
-    alias: string,
     amount: number,
     at: string,
   ): { event_id: string; source_alias: string }[] {
     return this.db
       .prepare(
-        'SELECT event_id,source_alias FROM transfers WHERE event_id<>? AND source_alias<>? AND principal_cents=? AND julianday(occurred_at) BETWEEN julianday(?) - 15.0 / 1440 AND julianday(?) + 15.0 / 1440 AND (matched_event_id IS NULL OR matched_event_id=?) ORDER BY ABS(julianday(occurred_at)-julianday(?))',
+        'SELECT event_id,source_alias FROM transfers WHERE event_id<>? AND principal_cents=? AND julianday(occurred_at) BETWEEN julianday(?) - 15.0 / 1440 AND julianday(?) + 15.0 / 1440 AND (matched_event_id IS NULL OR matched_event_id=?) ORDER BY ABS(julianday(occurred_at)-julianday(?))',
       )
-      .all(eventId, alias, -amount, at, at, eventId, at) as {
+      .all(eventId, -amount, at, at, eventId, at) as {
       event_id: string;
       source_alias: string;
     }[];

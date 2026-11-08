@@ -3,7 +3,7 @@ import { Settings } from 'luxon';
 import { EventStore } from '../src/db.js';
 import { Processor } from '../src/processor.js';
 import { parseSms } from '../src/parser.js';
-import { legacyImportId } from '../src/import-identity.js';
+import { legacyImportId, migrateImportIdentities } from '../src/import-identity.js';
 import type { ActualAdapter, ActualTransaction, ResolvedConfig } from '../src/types.js';
 import { banks, parsing } from './fixtures/banks.js';
 
@@ -169,7 +169,7 @@ describe('accounting reliability', () => {
   });
 
   it.each(['imported', 'failed'] as const)(
-    'reserves historical IDs for a pre-upgrade %s event without replaying imported transactions',
+    'reserves historical IDs during preparation without replaying a pre-upgrade %s event',
     async status => {
       const { store, actual, ledger } = setup();
       enqueue(store, 'old');
@@ -178,17 +178,15 @@ describe('accounting reliability', () => {
       const legacy = legacyImportId(result.transaction, 'a');
       store.update('old', status, { parsed: result.transaction, parserRevision: 14 });
       store.db.prepare('UPDATE events SET import_identity_revision=0 WHERE id=?').run('old');
+      migrateImportIdentities(store, config);
+      expect(store.reserveImportId('old', 'main', legacy)).toBe(legacy);
       const restarted = new Processor(store, actual, disabled, config);
-      if (status === 'failed') {
-        due(store, 'old');
-        await restarted.tick();
-        expect([...ledger.values()][0]?.transaction.imported_id).toBe(legacy);
-      }
       enqueue(store, 'new');
       await restarted.tick();
       const latest = [...ledger.values()].at(-1)?.transaction.imported_id;
       expect(latest).not.toBe(legacy);
-      expect(store.get('old')?.status).toBe('imported');
+      expect(ledger.size).toBe(1);
+      expect(store.get('old')?.status).toBe(status);
     },
   );
 });
