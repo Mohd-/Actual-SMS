@@ -1,4 +1,4 @@
-import type { ImportPlan, ParsedTransaction, ResolvedAccount } from './types.js';
+import type { ImportPlan, ParsedTransaction, ResolvedAccount, TransferEndpoint } from './types.js';
 import { resolveAccount, resolveBillPaymentAccount, resolveTransferAccount } from './routing.js';
 
 export interface TransferCandidate {
@@ -15,6 +15,29 @@ export type TransferRecognition =
       account?: ResolvedAccount;
       coversPrincipal: boolean;
     };
+
+export function snapshotTransferEndpoint(
+  account: ResolvedAccount,
+  accounts: ResolvedAccount[],
+): TransferEndpoint {
+  return structuredClone({
+    ...account,
+    rules: accounts.filter(rule => rule.key === account.key).map(rule => rule.match),
+  });
+}
+
+function endpointRules(endpoint: TransferEndpoint | undefined): ResolvedAccount[] {
+  return endpoint
+    ? (endpoint.rules ?? [endpoint.match]).map(match => ({ ...endpoint, match }))
+    : [];
+}
+
+function hasCompleteEndpointEvidence(plan: ImportPlan | null): boolean {
+  return Boolean(
+    plan?.endpoints?.source.rules?.length &&
+    (!plan.targetKey || plan.endpoints.target?.rules?.length),
+  );
+}
 
 /** Candidates have already passed the opposite-principal and 15-minute filters.
  * Amount/time alone never authorizes pairing or a replacement principal write.
@@ -33,33 +56,37 @@ export function recognizeTransfer(
     }
     const source = plan?.endpoints?.source;
     const target = plan?.endpoints?.target;
+    const sourceRules = endpointRules(source);
+    const targetRules = endpointRules(target);
     const rawOwn =
       tx.accountAlias !== undefined && tx.accountAlias === prior.transferCounterpartyAlias;
     const rawOther =
       prior.accountAlias !== undefined && tx.transferCounterpartyAlias === prior.accountAlias;
-    const own = target && resolveAccount([target], tx);
+    const own = target && resolveAccount(targetRules, tx);
     const other =
       source &&
       (tx.billPaymentIdentifier
-        ? resolveBillPaymentAccount([source], tx.billPaymentIdentifier)
+        ? resolveBillPaymentAccount(sourceRules, tx.billPaymentIdentifier)
         : tx.transferCounterpartyAlias
-          ? resolveTransferAccount([source], tx.transferCounterpartyAlias)
+          ? resolveTransferAccount(sourceRules, tx.transferCounterpartyAlias)
           : undefined);
     const related = own || other || rawOwn || rawOther;
     if (!related) {
-      if (!source) {
-        // A legacy record has no endpoint snapshot. Only explicit, different
-        // identifiers at both ends establish that it is unrelated.
-        const differentOwn = tx.accountAlias && prior.transferCounterpartyAlias && !rawOwn;
-        const differentOther = tx.transferCounterpartyAlias && prior.accountAlias && !rawOther;
-        if (!differentOwn || !differentOther) uncertain = true;
-      } else if (target && tx.bank === target.match.bank && !tx.accountAlias) uncertain = true;
+      // A selected legacy rule can prove a match, but cannot exclude aliases
+      // omitted from its snapshot. Different raw identifiers are not enough.
+      if (
+        !hasCompleteEndpointEvidence(plan) ||
+        (targetRules.some(rule => tx.bank === rule.match.bank) && !tx.accountAlias)
+      )
+        uncertain = true;
       continue;
     }
-    const targetIdentifiers = [
-      ...(target?.match.accountSuffixes ?? []),
-      ...(target?.match.transferIdentifiers ?? []),
-    ];
+    const targetIdentifiers = targetRules
+      .filter(rule => rule.match.bank === tx.bank)
+      .flatMap(rule => [
+        ...(rule.match.accountSuffixes ?? []),
+        ...(rule.match.transferIdentifiers ?? []),
+      ]);
     // A broad bank/balance route cannot override an explicitly different recipient.
     // Biller codes identify a destination but are not the card's own SMS suffix.
     const knownRecipient = prior.billPaymentIdentifier
@@ -67,7 +94,7 @@ export function recognizeTransfer(
       : prior.transferCounterpartyAlias;
     const conflictingOwn =
       target &&
-      (tx.bank !== target.match.bank ||
+      (!targetRules.some(rule => rule.match.bank === tx.bank) ||
         (tx.accountAlias !== undefined &&
           (knownRecipient || targetIdentifiers.length > 0) &&
           !rawOwn &&
@@ -77,9 +104,12 @@ export function recognizeTransfer(
       !other &&
       !rawOther &&
       (tx.billPaymentIdentifier || tx.transferCounterpartyAlias) &&
-      (source.match.accountSuffixes ||
-        source.match.transferIdentifiers ||
-        source.match.billPaymentIdentifiers ||
+      (sourceRules.some(
+        rule =>
+          rule.match.accountSuffixes ||
+          rule.match.transferIdentifiers ||
+          rule.match.billPaymentIdentifiers,
+      ) ||
         prior.accountAlias);
     if (!source || (plan?.targetKey && !target) || conflictingOwn || conflictingOther) {
       uncertain = true;

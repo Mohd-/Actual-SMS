@@ -88,6 +88,26 @@ async function setup() {
   };
 }
 
+async function setupAlternateRules() {
+  const f = await setup();
+  f.config.accounts[1]!.match.accountSuffixes = ['7404'];
+  f.config.accounts.push(
+    {
+      key: 'checking',
+      id: 'checking',
+      name: 'Checking',
+      match: { bank: 'sab', accountSuffixes: ['5678'], transferIdentifiers: ['9999'] },
+    },
+    {
+      key: 'target',
+      id: 'target',
+      name: 'Target',
+      match: { bank: 'alrajhi', accountSuffixes: ['8888'] },
+    },
+  );
+  return f;
+}
+
 describe('durable transfer execution', () => {
   it.each([
     ['debit', 'source'],
@@ -166,6 +186,195 @@ bankFeesCategory: Fees
     },
   );
 
+  it.each([
+    ['debit', 'source', false],
+    ['debit', 'target', false],
+    ['debit', 'both', false],
+    ['credit', 'source', false],
+    ['credit', 'target', false],
+    ['credit', 'both', false],
+    ['debit', 'source', true],
+    ['debit', 'target', true],
+    ['debit', 'both', true],
+    ['credit', 'source', true],
+    ['credit', 'target', true],
+    ['credit', 'both', true],
+  ] as const)(
+    'pairs %s first using alternate %s rules (remove routes: %s)',
+    async (first, alternate, removeRoutes) => {
+      const f = await setupAlternateRules();
+      f.allowFee();
+      const credit = incoming
+        .replace('1234', alternate === 'target' ? '1234' : '9999')
+        .replace('7404', alternate === 'source' ? '7404' : '8888');
+      if (first === 'debit') f.enqueue('debit');
+      else f.enqueue('credit', credit, 'AlRajhiBank');
+      await f.processor().tick();
+      expect(f.store.get(first)?.status).toBe('imported');
+      if (removeRoutes) f.config.accounts = [];
+      f.reopen();
+      if (first === 'debit') f.enqueue('credit', credit, 'AlRajhiBank');
+      else f.enqueue('debit');
+      await f.processor().tick();
+      expect(f.store.get('debit')?.status).toBe('imported');
+      expect(f.store.get('credit')?.status).toBe('imported');
+      expect(f.requests).toHaveLength(2);
+      expect(f.ledger.size).toBe(3);
+    },
+  );
+
+  describe.each(['debit', 'credit'] as const)('%s-first legacy evidence', first => {
+    it.each([
+      ['missing source rules', "json_remove(plan,'$.endpoints.source.rules')"],
+      ['missing target rules', "json_remove(plan,'$.endpoints.target.rules')"],
+      [
+        'missing both rule lists',
+        "json_remove(plan,'$.endpoints.source.rules','$.endpoints.target.rules')",
+      ],
+      ['empty source rules', "json_set(plan,'$.endpoints.source.rules',json('[]'))"],
+      ['empty target rules', "json_set(plan,'$.endpoints.target.rules',json('[]'))"],
+      [
+        'empty both rule lists',
+        "json_set(plan,'$.endpoints.source.rules',json('[]'),'$.endpoints.target.rules',json('[]'))",
+      ],
+      ['missing endpoints', "json_remove(plan,'$.endpoints')"],
+    ])(
+      'holds alternate identifiers with %s instead of duplicating the principal',
+      async (_label, legacyPlan) => {
+        const f = await setupAlternateRules();
+        f.allowFee();
+        if (first === 'debit') f.enqueue('debit');
+        else f.enqueue('credit', incoming, 'AlRajhiBank');
+        await f.processor().tick();
+        f.store.db
+          .prepare(`UPDATE import_executions SET plan=${legacyPlan} WHERE event_id=?`)
+          .run(first);
+        const owner = f.store.get(first);
+        const execution = f.store.importExecution(first);
+        const identities = f.store.db.prepare('SELECT * FROM event_import_ids').all();
+        const requests = structuredClone(f.requests);
+        const ledger = [...f.ledger];
+        f.reopen();
+        const second = first === 'debit' ? 'credit' : 'debit';
+        if (second === 'credit')
+          f.enqueue(
+            second,
+            incoming.replace('1234', '9999').replace('7404', '8888'),
+            'AlRajhiBank',
+          );
+        else f.enqueue(second, outgoing.replace('1234', '5678').replace('7404', '8888'));
+        await f.processor().tick();
+        expect(f.store.get(second)).toMatchObject({
+          status: 'failed',
+          attempts: 0,
+          error: expect.stringContaining('reconciliation'),
+        });
+        expect(f.requests).toEqual(requests);
+        expect([...f.ledger]).toEqual(ledger);
+        expect(f.store.importExecution(second)).toBeUndefined();
+        expect(f.store.db.prepare('SELECT * FROM event_import_ids').all()).toEqual(identities);
+        expect(f.store.get(first)).toEqual(owner);
+        expect(f.store.importExecution(first)).toEqual(execution);
+      },
+    );
+  });
+
+  it.each(['debit', 'credit'] as const)(
+    'still recognizes older single-rule endpoint snapshots after %s first and routing removal',
+    async first => {
+      const f = await setup();
+      f.allowFee();
+      if (first === 'debit') f.enqueue('debit');
+      else f.enqueue('credit', incoming, 'AlRajhiBank');
+      await f.processor().tick();
+      f.store.db
+        .prepare(
+          `UPDATE import_executions SET plan=json_remove(plan,
+        '$.endpoints.source.rules','$.endpoints.target.rules') WHERE event_id=?`,
+        )
+        .run(first);
+      f.config.accounts = [];
+      f.reopen();
+      if (first === 'debit') f.enqueue('credit', incoming, 'AlRajhiBank');
+      else f.enqueue('debit');
+      await f.processor().tick();
+      expect(f.store.get('debit')?.status).toBe('imported');
+      expect(f.store.get('credit')?.status).toBe('imported');
+      expect(f.requests).toHaveLength(2);
+      expect(f.ledger.size).toBe(3);
+    },
+  );
+
+  it.each(['legacy-first', 'modern-first'] as const)(
+    'holds an uncertain legacy candidate alongside a modern match (%s)',
+    async order => {
+      const f = await setupAlternateRules();
+      f.allowFee();
+      const owners = order === 'legacy-first' ? ['legacy', 'modern'] : ['modern', 'legacy'];
+      for (const owner of owners) {
+        f.enqueue(
+          owner,
+          owner === 'legacy' ? outgoing : outgoing.replace('1234', '5678').replace('7404', '8888'),
+        );
+        await f.processor().tick();
+      }
+      f.store.db.exec(`UPDATE import_executions SET plan=json_remove(plan,
+        '$.endpoints.source.rules','$.endpoints.target.rules') WHERE event_id='legacy'`);
+      f.reopen();
+      const requests = structuredClone(f.requests);
+      const ledger = [...f.ledger];
+      f.enqueue('credit', incoming.replace('1234', '9999').replace('7404', '8888'), 'AlRajhiBank');
+      await f.processor().tick();
+      expect(f.store.get('credit')).toMatchObject({
+        status: 'failed',
+        attempts: 0,
+        error: expect.stringContaining('reconciliation'),
+      });
+      expect(f.store.importExecution('credit')).toBeUndefined();
+      expect(f.requests).toEqual(requests);
+      expect([...f.ledger]).toEqual(ledger);
+    },
+  );
+
+  it.each(['different amount', 'outside time window', 'same direction'] as const)(
+    'does not hold a notification excluded by candidate filters: %s',
+    async difference => {
+      const f = await setup();
+      f.allowFee();
+      f.enqueue('debit');
+      await f.processor().tick();
+      f.store.db.exec(
+        "UPDATE import_executions SET plan=json_remove(plan,'$.endpoints') WHERE event_id='debit'",
+      );
+      f.config.accounts.push({
+        key: 'other',
+        id: 'other',
+        name: 'Other',
+        match: { bank: 'sab', accountSuffixes: ['9999'] },
+      });
+      f.reopen();
+      f.store.enqueue({
+        eventId: 'unrelated',
+        sender: 'SAB',
+        message:
+          difference === 'same direction'
+            ? 'SAB outgoing transfer From: 9999 To: 8888 Amount: SAR 100.00'
+            : `SAB incoming transfer From: 8888 To: 9999 Amount: SAR ${difference === 'different amount' ? '101.00' : '100.00'}`,
+        receivedAt: difference === 'outside time window' ? '2026-08-22T11:10:30+03:00' : receivedAt,
+      });
+      await f.processor().tick();
+      expect(f.store.get('unrelated')?.status).toBe('imported');
+      expect(f.requests).toHaveLength(3);
+      expect(f.requests.at(-1)?.transaction.amount).toBe(
+        difference === 'different amount'
+          ? 10100
+          : difference === 'same direction'
+            ? -10000
+            : 10000,
+      );
+    },
+  );
+
   it('holds multiple plausible counterparts instead of choosing the nearest and writing another principal', async () => {
     const f = await setup();
     f.allowFee();
@@ -212,6 +421,8 @@ bankFeesCategory: Fees
       SELECT event_id,json_remove(plan,'$.version','$.kind','$.endpoints'),principal_done,fee_done,complete,principal_actual_id,fee_actual_id FROM import_executions;
       DROP TABLE import_executions; DELETE FROM service_migrations WHERE key='import-execution:1';`);
     f.reopen();
+    const frozenPlan = f.store.importExecution('debit')?.plan;
+    const identities = f.store.db.prepare('SELECT * FROM event_import_ids').all();
     // This old table is no longer consulted for dispatch or progress.
     f.store.db.exec('DELETE FROM transfer_executions');
     f.config.accounts[0]!.id = 'replacement';
@@ -224,6 +435,8 @@ bankFeesCategory: Fees
     expect(f.requests.at(-1)?.account).toBe('checking');
     expect(f.requests.at(-1)?.transaction.category).toBe('fees');
     expect(f.ledger.size).toBe(3);
+    expect(f.store.importExecution('debit')?.plan).toEqual(frozenPlan);
+    expect(f.store.db.prepare('SELECT * FROM event_import_ids').all()).toEqual(identities);
     f.reopen();
     f.enqueue('credit', incoming, 'AlRajhiBank');
     await f.processor().tick();
@@ -404,21 +617,25 @@ bankFeesCategory: Fees
     expect(f.ledger.size).toBe(2);
   });
 
-  it('does not hold an unrelated same-amount transfer', async () => {
-    const f = await setup();
-    f.enqueue('debit');
-    await f.processor().tick();
-    f.config.accounts.push({
-      key: 'other',
-      id: 'other',
-      name: 'Other',
-      match: { bank: 'sab', accountSuffixes: ['9999'] },
-    });
-    f.enqueue('other-credit', 'SAB incoming transfer From: 8888 To: 9999 Amount: SAR 100.00');
-    await f.processor().tick();
-    expect(f.store.get('other-credit')?.status).toBe('imported');
-    expect(f.ledger.size).toBe(3);
-  });
+  it.each([true, false])(
+    'does not hold an unrelated same-amount transfer (linked owner: %s)',
+    async linked => {
+      const f = await setup();
+      if (!linked) f.config.accounts.pop();
+      f.enqueue('debit');
+      await f.processor().tick();
+      f.config.accounts.push({
+        key: 'other',
+        id: 'other',
+        name: 'Other',
+        match: { bank: 'sab', accountSuffixes: ['9999'] },
+      });
+      f.enqueue('other-credit', 'SAB incoming transfer From: 8888 To: 9999 Amount: SAR 100.00');
+      await f.processor().tick();
+      expect(f.store.get('other-credit')?.status).toBe('imported');
+      expect(f.ledger.size).toBe(linked ? 3 : 2);
+    },
+  );
   it('resumes the frozen account and fee plan after restart and routing edits', async () => {
     const f = await setup();
     f.enqueue('debit');

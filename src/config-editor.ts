@@ -1,4 +1,4 @@
-import { lstat, realpath, open, rename, unlink, access } from 'node:fs/promises';
+import { lstat, realpath, open, rename, link, unlink, access } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -68,21 +68,21 @@ export class ConfigEditor {
       const path = this.runtime.paths.accounts;
       const temporary = `${path}.${randomUUID()}.tmp`;
       const backup = `${path}.previous`;
+      const backupTemporary = `${backup}.${randomUUID()}.tmp`;
       let committed = false;
       try {
-        // Exclusive creation rejects backup symlinks and never overwrites an operator's copy.
-        const previous = await open(backup, 'wx', 0o600).catch(error => {
-          if ((error as NodeJS.ErrnoException).code === 'EEXIST') return null;
-          throw error;
-        });
-        if (previous) {
-          try {
-            await previous.writeFile(current.accounts);
-            await previous.sync();
-          } finally {
-            await previous.close();
-          }
+        const previous = await open(backupTemporary, 'wx', 0o600);
+        try {
+          await previous.writeFile(current.accounts);
+          await previous.sync();
+        } finally {
+          await previous.close();
         }
+        // Publish only a complete backup. Linking is atomic and never replaces
+        // an existing operator copy or follows an existing backup symlink.
+        await link(backupTemporary, backup).catch(error => {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        });
         const file = await open(temporary, 'wx', info.mode & 0o777);
         try {
           const temporaryInfo = await file.stat();
@@ -114,6 +114,7 @@ export class ConfigEditor {
         throw error;
       } finally {
         await unlink(temporary).catch(() => {});
+        await unlink(backupTemporary).catch(() => {});
       }
     });
   }

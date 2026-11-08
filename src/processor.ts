@@ -13,7 +13,11 @@ import { resolveAccount, resolveBillPaymentAccount, resolveTransferAccount } fro
 import { MerchantResolver, merchantKey } from './merchant-resolver.js';
 import { importId } from './import-identity.js';
 import { WorkGate } from './work-gate.js';
-import { recognizeTransfer, type TransferRecognition } from './transfer-matching.js';
+import {
+  recognizeTransfer,
+  snapshotTransferEndpoint,
+  type TransferRecognition,
+} from './transfer-matching.js';
 
 const retryMs = [60_000, 300_000, 1_800_000, 7_200_000];
 export class Processor {
@@ -330,7 +334,10 @@ export class Processor {
         accountId: account.id,
         sourceKey: account.key,
         targetKey: target?.key,
-        endpoints: { source: account, target },
+        endpoints: {
+          source: snapshotTransferEndpoint(account, this.config.accounts),
+          target: target ? snapshotTransferEndpoint(target, this.config.accounts) : undefined,
+        },
         parsed: tx,
         principalCents: target ? principal : (tx.principalCents ?? tx.amountCents!),
         principal: {
