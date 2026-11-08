@@ -15,5 +15,3 @@ actual-cache/
 .migration-private/
 *.log
 
-**/__pycache__/
-update-stack.local.json
