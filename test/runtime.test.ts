@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { runtimeFixture } from './fixtures/runtime.js';
 import { Processor } from '../src/processor.js';
 import { EventStore } from '../src/db.js';
 import { NoopEnricher } from '../src/enricher.js';
 import { ConfigurationError } from '../src/runtime-config.js';
+import { Runtime } from '../src/runtime.js';
 import { readFile, writeFile } from 'node:fs/promises';
 import { ConfigEditor } from '../src/config-editor.js';
 
@@ -15,6 +16,72 @@ function deferred() {
   return { promise, release };
 }
 describe('configured runtime lifecycle', () => {
+  it('keeps maintenance startup disconnected without touching the Actual adapter', async () => {
+    const f = await runtimeFixture();
+    try {
+      const runtime = new Runtime(f.actual, f.config, f.paths);
+      const sync = vi.spyOn(f.actual, 'sync');
+      const shutdown = vi.spyOn(f.actual, 'shutdown');
+      const initialize = vi.spyOn(f.actual, 'initialize');
+      runtime.beginShutdown();
+      await runtime.shutdown();
+      await runtime.shutdown();
+      await expect(runtime.reconnect()).rejects.toThrow('shutting down');
+      expect(runtime.status().ready).toBe(false);
+      expect(sync).not.toHaveBeenCalled();
+      expect(shutdown).not.toHaveBeenCalled();
+      expect(initialize).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      await f.cleanup();
+    }
+  });
+  it('allows process shutdown after maintenance without closing Actual twice', async () => {
+    const f = await runtimeFixture();
+    try {
+      const sync = vi.spyOn(f.actual, 'sync');
+      const shutdown = vi.spyOn(f.actual, 'shutdown');
+      await f.runtime.shutdown();
+      await f.runtime.shutdown();
+      expect(f.runtime.status().ready).toBe(false);
+      expect(sync).toHaveBeenCalledTimes(1);
+      expect(shutdown).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.restoreAllMocks();
+      await f.cleanup();
+    }
+  });
+  it('does not claim new work after stopping the processor', async () => {
+    const f = await runtimeFixture();
+    const store = new EventStore(':memory:');
+    try {
+      const processor = new Processor(store, f.actual, new NoopEnricher(), f.config);
+      await processor.stop();
+      store.enqueue({
+        eventId: 'after-stop',
+        sender: 'SAB',
+        message: 'Purchase Card:1234 Amount: SAR 10 at Coffee',
+        receivedAt: '2026-08-22T10:00:00+03:00',
+      });
+      await processor.tick();
+      expect(store.get('after-stop')).toMatchObject({ status: 'queued', attempts: 0 });
+      expect(store.eventHistory('after-stop')).toHaveLength(1);
+    } finally {
+      store.close();
+      await f.cleanup();
+    }
+  });
+  it('keeps imports paused when the configured Actual version does not match', async () => {
+    const f = await runtimeFixture();
+    try {
+      f.actual.serverVersion = async () => '0.0.0';
+      await expect(f.runtime.reconnect()).rejects.toThrow('Actual connection');
+      expect(f.runtime.status().ready).toBe(false);
+      expect(f.runtime.gate.enter()).toBeUndefined();
+    } finally {
+      await f.cleanup();
+    }
+  });
   it('pauses queued imports during a connection outage without consuming attempts', async () => {
     const f = await runtimeFixture(),
       store = new EventStore(':memory:');

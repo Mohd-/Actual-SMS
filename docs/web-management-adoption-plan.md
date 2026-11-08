@@ -109,7 +109,7 @@ These patches require no web dependencies or configuration migration. Existing p
 - `/readyz`: configuration is resolved, an Actual session is initialized, and the importer is not paused, reconnecting, or shutting down.
 - Authenticated management status: detailed state and sanitized recovery errors.
 
-Readiness is not a promise that every future import will succeed, nor does it introduce a stricter version-mismatch policy than upstream currently has. An available login page alone never makes `/readyz` healthy.
+Readiness is not a promise that every future import will succeed. Preserve the integrated upstream version gate: server metadata must match the installed Actual API before the budget is opened, and mismatch or discovery failure blocks imports. Preserve upstream maintenance-marker behavior too; browser reconnects and configuration activation cannot override a deployment maintenance pause. These are upstream safeguards, not additional management-owned version or deployment policies. An available login page alone never makes `/readyz` healthy.
 
 **Tests and acceptance**
 
