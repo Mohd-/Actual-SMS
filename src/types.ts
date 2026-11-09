@@ -96,6 +96,29 @@ export interface ActualTransaction {
   imported_id: string;
   cleared?: boolean;
 }
+/** Frozen account identity, including every routing rule for that account. */
+export interface TransferEndpoint extends ResolvedAccount {
+  /** Absent on older executions, whose selected match remains the only evidence. */
+  rules?: AccountConfig['match'][];
+}
+/** Versioned write intent, retained unchanged across retries and restarts. */
+export interface ImportPlan {
+  version: 1;
+  kind: 'ordinary' | 'transfer';
+  accountId: string;
+  sourceKey: string;
+  targetKey?: string;
+  /** Historical endpoint evidence, never a live routing configuration source. */
+  endpoints?: { source: TransferEndpoint; target?: TransferEndpoint };
+  parsed: ParsedTransaction;
+  principalCents: number;
+  main?: ActualTransaction;
+  /** Absent when a completed counterpart already covers the principal. */
+  principal?: ActualTransaction;
+  fee?: ActualTransaction;
+  review: boolean;
+  matchedEventId?: string;
+}
 export interface ActualCategory {
   id: string;
   name: string;

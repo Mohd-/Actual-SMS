@@ -1,5 +1,6 @@
 import { banks, parsing } from './fixtures/banks.js';
 import { createHash } from 'node:crypto';
+import { Settings } from 'luxon';
 import { afterEach, describe, expect, it } from 'vitest';
 import { EventStore } from '../src/db.js';
 import { PARSER_REVISION } from '../src/parser.js';
@@ -10,6 +11,7 @@ const stores: EventStore[] = [];
 afterEach(() => {
   for (const store of stores) store.close();
   stores.length = 0;
+  Settings.defaultZone = 'system';
 });
 
 const config: ResolvedConfig = {
@@ -87,6 +89,7 @@ function setup() {
     store,
     imported,
     transferPayees,
+    actual,
     processor: new Processor(store, actual, ai, config),
   };
 }
@@ -104,6 +107,107 @@ const cardPaymentIbanEndingInBillerCode =
 const receivedAt = '2026-08-22T10:10:30+03:00';
 
 describe('processor transfer routing', () => {
+  it('retains partial transfer success and retries errors without changing import identities', async () => {
+    const { store, processor, actual, imported } = setup();
+    const write = actual.importTransactions;
+    let reject = true;
+    actual.importTransactions = async (account, transactions) => {
+      await write(account, transactions);
+      return {
+        added: ['partial-id'],
+        updated: [],
+        errors: reject ? [{ message: 'Rejected' }] : [],
+      };
+    };
+    const { id } = store.enqueue({ sender: 'SAB', message: outgoing, receivedAt });
+    await processor.tick();
+    expect(store.get(id)).toMatchObject({
+      status: 'queued',
+      error: 'Rejected',
+      actual_transaction_id: 'partial-id',
+    });
+    const identity = imported[0]!.transactions[0]!.imported_id;
+    reject = false;
+    store.update(id, 'queued', { nextAttemptAt: new Date().toISOString() });
+    await processor.tick();
+    expect(store.get(id)?.status).toBe('imported');
+    expect(imported[1]!.transactions[0]!.imported_id).toBe(identity);
+  });
+
+  it('uses the SMS calendar day rather than the host day around midnight', async () => {
+    Settings.defaultZone = 'utc';
+    const { store, processor, imported } = setup();
+    store.enqueue({
+      sender: 'SAB',
+      message: 'Purchase Card:4101 Amount: SAR 10 at Coffee On: 2026-08-22 00:15:00',
+      receivedAt: '2026-08-21T21:16:00Z',
+    });
+    await processor.tick();
+    expect(imported[0]!.transactions[0]!.date).toBe('2026-08-22');
+  });
+
+  it('records principal success when the fee fails and retries only the outstanding fee identity', async () => {
+    const { store, processor, actual, imported } = setup();
+    const write = actual.importTransactions;
+    let fail = true;
+    actual.importTransactions = async (account, transactions) => {
+      await write(account, transactions);
+      return transactions[0]?.amount === -200 && fail
+        ? { added: [], updated: [], errors: [{ message: 'Fee rejected' }] }
+        : { added: ['principal-id'], updated: [], errors: [] };
+    };
+    const { id } = store.enqueue({
+      sender: 'SAB',
+      message: outgoing + ' Fees: SAR 2.00',
+      receivedAt,
+    });
+    await processor.tick();
+    expect(store.get(id)).toMatchObject({
+      status: 'queued',
+      actual_transaction_id: 'principal-id',
+      error: 'Fee rejected',
+    });
+    const ids = imported.map(i => i.transactions[0]!.imported_id);
+    fail = false;
+    store.update(id, 'queued', { nextAttemptAt: new Date().toISOString() });
+    await processor.tick();
+    expect(imported.slice(2).map(i => i.transactions[0]!.imported_id)).toEqual([ids[1]]);
+    expect(store.importExecution(id)?.plan?.principal?.imported_id).toBe(ids[0]);
+    expect(store.get(id)?.status).toBe('imported');
+  });
+  it.each([
+    'SAB outgoing transfer From: 5202 To: 9999 Amount: SAR 100.00',
+    'SAB Purchase Card:5202 Amount: SAR 10 at Coffee',
+  ])('checks rejected unlinked and ordinary imports: %s', async message => {
+    const { store, processor, actual } = setup();
+    actual.importTransactions = async () => ({
+      added: [],
+      updated: [],
+      errors: [{ message: 'Rejected' }],
+    });
+    const { id } = store.enqueue({ sender: 'SAB', message, receivedAt });
+    await processor.tick();
+    expect(store.get(id)).toMatchObject({ status: 'queued', error: 'Rejected' });
+  });
+  it('retries sync after a successful write without reissuing the completed principal', async () => {
+    const { store, processor, actual, imported } = setup();
+    let fail = true;
+    actual.sync = async () => {
+      if (fail) throw new Error('Sync failed');
+    };
+    const { id } = store.enqueue({ sender: 'SAB', message: outgoing, receivedAt });
+    await processor.tick();
+    expect(store.get(id)).toMatchObject({ status: 'queued', actual_transaction_id: 'actual-id' });
+    fail = false;
+    store.update(id, 'queued', { nextAttemptAt: new Date().toISOString() });
+    await processor.tick();
+    expect(imported).toHaveLength(1);
+    expect(store.importExecution(id)?.plan?.principal?.imported_id).toBe(
+      imported[0]!.transactions[0]!.imported_id,
+    );
+    expect(store.get(id)?.status).toBe('imported');
+  });
+
   it('imports a salary transfer into the account named by its To field', async () => {
     const { store, imported, processor } = setup();
     const id = store.enqueue({

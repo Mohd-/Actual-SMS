@@ -1,30 +1,41 @@
-import { loadParserConfig } from './parsing/config.js';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { loadBankConfigFile, loadConfigFile, loadEnv } from './config.js';
+import { loadEnv } from './config.js';
 import { EventStore } from './db.js';
 import { ActualApiAdapter } from './actual.js';
 import { NoopEnricher, OpenCodeGoEnricher } from './enricher.js';
 import { Processor } from './processor.js';
+import { migrateImportIdentities } from './import-identity.js';
 import { buildServer } from './server.js';
-import { resolveConfig } from './resolve-config.js';
+import { Runtime } from './runtime.js';
+import { ConfigurationError, parseConfigFiles, readConfigFiles } from './runtime-config.js';
+import { ConfigEditor } from './config-editor.js';
+import { ManagementCredentials } from './management/credentials.js';
+import type { ResolvedConfig } from './types.js';
 
 const env = loadEnv();
 await Promise.all([
   mkdir(dirname(env.DB_PATH), { recursive: true }),
   mkdir(env.ACTUAL_CACHE_DIR, { recursive: true }),
 ]);
-const banks = await loadBankConfigFile(env.BANKS_CONFIG_PATH);
-const parsing = await loadParserConfig(env.PARSING_CONFIG_PATH, banks);
-const file = await loadConfigFile(env.CONFIG_PATH, banks);
+const paths = {
+  accounts: env.CONFIG_PATH,
+  banks: env.BANKS_CONFIG_PATH,
+  parsing: env.PARSING_CONFIG_PATH,
+};
+// File/schema errors remain fatal, even when management is enabled.
+const parsed = parseConfigFiles(await readConfigFiles(paths));
+const config: ResolvedConfig = {
+  banks: parsed.banks,
+  parsing: parsed.parsing,
+  accounts: [],
+  bankFeesCategoryId: '',
+  eligibleCategories: [],
+};
 const store = new EventStore(env.DB_PATH);
 const maintenanceFile = join(dirname(env.DB_PATH), 'actual-sms-maintenance');
-let paused = existsSync(maintenanceFile);
-let ready = false;
-let initialized = false;
-let processor: Processor | undefined;
-let mappingRefresh: NodeJS.Timeout | undefined;
+let maintenancePaused = existsSync(maintenanceFile);
 const actual = new ActualApiAdapter({
   serverURL: env.ACTUAL_SERVER_URL,
   password: env.ACTUAL_PASSWORD,
@@ -32,86 +43,95 @@ const actual = new ActualApiAdapter({
   encryptionPassword: env.ACTUAL_ENCRYPTION_PASSWORD,
   dataDir: env.ACTUAL_CACHE_DIR,
 });
+const runtime = new Runtime(actual, config, paths, snapshot =>
+  migrateImportIdentities(store, snapshot),
+);
+if (maintenancePaused) runtime.beginShutdown();
 try {
-  if (!paused) {
-    await actual.initialize();
-    initialized = true;
-    const [accounts, categories] = await Promise.all([actual.accounts(), actual.categories()]);
-    const config = resolveConfig(file, banks, parsing, accounts, categories);
-    const ai = env.OPENCODE_GO_API_KEY
-      ? new OpenCodeGoEnricher(env.OPENCODE_GO_API_KEY, env.OPENCODE_GO_MODEL)
-      : new NoopEnricher();
-    processor = new Processor(
-      store,
-      actual,
-      ai,
-      config,
-      env.MAX_ATTEMPTS,
-      env.ENRICHMENT_MIN_CONFIDENCE,
-    );
-    await processor
-      .refreshMappings()
-      .catch(() =>
-        console.warn('Initial merchant mapping refresh failed; using persisted mappings'),
+  if (!maintenancePaused)
+    await runtime.reconnect().catch(error => {
+      if (!env.MANAGEMENT_ENABLED || error instanceof ConfigurationError) throw error;
+      console.warn(
+        'Actual unavailable; imports paused. Use management to retry the configured connection.',
       );
-    processor.start();
-    ready = true;
-  }
+    });
+  const ai = env.OPENCODE_GO_API_KEY
+    ? new OpenCodeGoEnricher(env.OPENCODE_GO_API_KEY, env.OPENCODE_GO_MODEL)
+    : new NoopEnricher();
+  const processor = new Processor(
+    store,
+    actual,
+    ai,
+    config,
+    env.MAX_ATTEMPTS,
+    env.ENRICHMENT_MIN_CONFIDENCE,
+    undefined,
+    runtime.gate,
+  );
+  await processor
+    .refreshMappings()
+    .catch(() => console.warn('Initial mapping refresh failed; using persisted mappings'));
+  const credentials = new ManagementCredentials(store.db);
   const app = buildServer({
     apiKey: env.API_KEY,
-    banks,
+    banks: () => config.banks,
     store,
-    processor: {
-      tick: async () => {
-        if (!paused) await processor?.tick();
-      },
-    },
-    ready: () => ready,
+    processor,
+    ready: () => runtime.status().ready,
     logger: env.LOG_LEVEL,
+    taskerCredentials: credentials,
     maintenance: {
-      paused: () => paused,
+      paused: () => maintenancePaused,
       pause: async () => {
         await writeFile(maintenanceFile, 'paused by coordinated updater\n', { mode: 0o600 });
-        paused = true;
-        ready = false;
-        if (mappingRefresh) clearInterval(mappingRefresh);
-        await processor?.stop();
-        if (initialized) {
-          await actual.sync().catch(() => {});
-          await actual.shutdown();
-          initialized = false;
-        }
+        maintenancePaused = true;
+        runtime.beginShutdown();
+        clearInterval(timer);
+        await processor.stop();
+        await runtime.shutdown();
       },
     },
+    management: env.MANAGEMENT_ENABLED
+      ? {
+          runtime,
+          editor: new ConfigEditor(runtime, env.MANAGEMENT_EDIT_ACCOUNTS),
+          credentials,
+          origin: env.MANAGEMENT_URL!,
+          passwordHash: env.MANAGEMENT_PASSWORD_HASH!,
+          secret: env.MANAGEMENT_SECRET!,
+          refresh: () =>
+            processor
+              .refreshMappings()
+              .catch(() => app.log.warn('Mapping refresh failed; using persisted mappings')),
+        }
+      : undefined,
   });
-  if (processor) {
-    mappingRefresh = setInterval(() => {
-      if (!paused)
-        void processor!
-          .refreshMappings()
-          .catch(() => app.log.warn('merchant mapping refresh failed'));
-    }, env.MAPPING_REFRESH_MINUTES * 60_000);
-    mappingRefresh.unref();
-  }
+  const timer = setInterval(
+    () =>
+      void processor
+        .refreshMappings()
+        .catch(() => app.log.warn('Mapping refresh failed; using persisted mappings')),
+    env.MAPPING_REFRESH_MINUTES * 60000,
+  );
+  timer.unref();
+  let stopping = false;
   const shutdown = async (signal: string) => {
-    ready = false;
-    if (mappingRefresh) clearInterval(mappingRefresh);
+    if (stopping) return;
+    stopping = true;
+    runtime.beginShutdown();
+    clearInterval(timer);
     app.log.info({ signal }, 'shutting down');
     await app.close();
-    await processor?.stop();
-    if (initialized) {
-      await actual.sync().catch(() => {});
-      await actual.shutdown();
-    }
+    await processor.stop();
+    await runtime.shutdown();
     store.close();
-    process.exit(0);
   };
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
   await app.listen({ host: '0.0.0.0', port: env.PORT });
+  if (!maintenancePaused) processor.start();
 } catch (error) {
-  ready = false;
-  await actual.shutdown().catch(() => {});
+  await runtime.shutdown().catch(() => {});
   store.close();
   throw error;
 }

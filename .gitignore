@@ -7,6 +7,9 @@ data/
 !.env.example
 .gitenv.*
 config/accounts.yaml
+config/editable/
+config/*.previous
+config/*.tmp
 config/*.local.yaml
 compose.local.yaml
 compose.host-override.yaml
@@ -14,4 +17,3 @@ compose.proxy.yaml
 actual-cache/
 .migration-private/
 *.log
-

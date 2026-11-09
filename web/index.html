@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Actual SMS management</title>
+    <link rel="stylesheet" href="/manage/style.css" />
+    <script type="module" src="/manage/app.js"></script>
+  </head>
+  <body>
+    <main>
+      <h1>Actual SMS management</h1>
+      <p>Manage the importer. Your YAML files remain authoritative.</p>
+      <p id="error" role="alert" hidden></p>
+      <form id="login">
+        <label
+          >Management password
+          <input
+            id="password"
+            type="password"
+            autocomplete="current-password"
+            required
+            maxlength="72"
+        /></label>
+        <button>Sign in</button>
+      </form>
+      <div id="workspace" hidden>
+        <nav aria-label="Management">
+          <button data-page="status">Status</button>
+          <button data-page="inbox">SMS audit</button>
+          <button data-page="config">Configuration</button>
+          <button data-page="tasker">Tasker</button>
+          <button id="logout">Sign out</button>
+          <button id="revoke">Sign out all sessions</button>
+        </nav>
+        <section id="status">
+          <h2>Importer status</h2>
+          <button id="refresh">Refresh status</button>
+          <button id="reconnect">Reconnect configured Actual server</button>
+          <pre id="status-data"></pre>
+          <p>
+            Actual connection credentials remain in your deployment environment. This page never
+            changes the budget.
+          </p>
+        </section>
+        <section id="inbox" hidden>
+          <h2>SMS audit</h2>
+          <p>
+            Read-only review. Correct imported transactions in Actual. Manual approval is not
+            enabled.
+          </p>
+          <form id="filter">
+            <label
+              >Status
+              <select id="filter-status">
+                <option value="">All</option>
+                <option>queued</option>
+                <option>processing</option>
+                <option>imported</option>
+                <option>imported_review</option>
+                <option>needs_review</option>
+                <option>ignored</option>
+                <option>failed</option>
+              </select></label
+            >
+            <button>Load messages</button>
+          </form>
+          <ul id="events"></ul>
+          <button id="next" disabled>Next page</button>
+          <h3>Authenticated message details</h3>
+          <pre id="event-detail">Select a message to view its original input and audit.</pre>
+        </section>
+        <section id="config" hidden>
+          <h2>YAML configuration</h2>
+          <p>
+            Account edits preserve the text you submit, including comments and advanced routing
+            rules. Coordinate with anyone editing these files externally.
+          </p>
+          <button id="config-load">Reload files from disk</button>
+          <button id="config-reload">Validate and activate disk configuration</button>
+          <pre id="config-state"></pre>
+          <label
+            >Account routing YAML <textarea id="accounts" rows="20" spellcheck="false"></textarea>
+          </label>
+          <button id="preview">Validate and preview changes</button>
+          <div id="diff" hidden>
+            <h3>Before</h3>
+            <pre id="before"></pre>
+            <h3>After</h3>
+            <pre id="after"></pre>
+          </div>
+          <label
+            ><input id="confirm-save" type="checkbox" /> I reviewed the changes and want to save and
+            activate this YAML.</label
+          >
+          <button id="save" disabled>Save and activate YAML</button>
+          <details>
+            <summary>Bank registry (read-only)</summary>
+            <pre id="banks"></pre>
+          </details>
+          <details>
+            <summary>Parsing grammar (read-only)</summary>
+            <pre id="parsing"></pre>
+          </details>
+        </section>
+        <section id="tasker" hidden>
+          <h2>Tasker connection</h2>
+          <p>
+            The existing API_KEY continues to work. The restricted key can submit SMS and
+            synchronize the inbox, but cannot read audit history or manage the service.
+          </p>
+          <button id="rotate">Generate / replace restricted key</button>
+          <label>Restricted key <input id="tasker-key" type="password" autocomplete="off" /></label>
+          <p>
+            A new key is returned only once and is not saved in this browser. Keep the downloaded
+            project private. Replacing a key requires re-importing the project on your phone.
+          </p>
+          <label
+            >Public HTTPS service origin
+            <input id="tasker-origin" type="url" placeholder="https://sms.example.test"
+          /></label>
+          <button id="export">Download configured Tasker project</button>
+          <h3>Inbox checkpoint</h3>
+          <pre id="checkpoint-state"></pre>
+          <button id="checkpoint-load">Refresh checkpoint</button>
+          <label
+            >Start at device-local time <input id="checkpoint-date" type="datetime-local" step="1"
+          /></label>
+          <p>
+            Moving backward rechecks older messages without replaying imported events. Moving
+            forward skips unread messages before the selected time. This does not erase queued
+            events. First use still defaults to seven days back unless you choose a checkpoint.
+          </p>
+          <button id="checkpoint-save">Confirm checkpoint change</button>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>

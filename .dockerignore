@@ -14,5 +14,7 @@ dist
 data
 actual-cache
 .migration-private
+config/editable
+*.previous
+*.tmp
 *.log
-

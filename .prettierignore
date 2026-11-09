@@ -3,4 +3,8 @@ node_modules/
 actual-cache/
 data/
 .env
+config/accounts.yaml
+config/editable/
+config/*.previous
+config/*.tmp
 package-lock.json

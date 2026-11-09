@@ -3,25 +3,71 @@ import YAML from 'yaml';
 import { z } from 'zod';
 import type { AppConfigFile, BankConfig } from './types.js';
 
-const envSchema = z.object({
-  API_KEY: z.string().min(16),
-  ACTUAL_SERVER_URL: z.string().url(),
-  ACTUAL_PASSWORD: z.string().min(1),
-  ACTUAL_SYNC_ID: z.string().min(1),
-  ACTUAL_ENCRYPTION_PASSWORD: z.string().optional(),
-  OPENCODE_GO_API_KEY: z.string().optional(),
-  OPENCODE_GO_MODEL: z.string().default('deepseek-v4-flash'),
-  CONFIG_PATH: z.string().default('/config/accounts.yaml'),
-  BANKS_CONFIG_PATH: z.string().default('/config/banks.yaml'),
-  PARSING_CONFIG_PATH: z.string().default('/config/parsing.yaml'),
-  DB_PATH: z.string().default('/data/events.sqlite'),
-  ACTUAL_CACHE_DIR: z.string().default('/actual-cache'),
-  PORT: z.coerce.number().int().min(1).max(65535).default(3000),
-  LOG_LEVEL: z.string().default('info'),
-  MAX_ATTEMPTS: z.coerce.number().int().min(1).default(5),
-  ENRICHMENT_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.7),
-  MAPPING_REFRESH_MINUTES: z.coerce.number().int().min(1).default(60),
-});
+const envSchema = z
+  .object({
+    API_KEY: z.string().min(16),
+    ACTUAL_SERVER_URL: z.string().url(),
+    ACTUAL_PASSWORD: z.string().min(1),
+    ACTUAL_SYNC_ID: z.string().min(1),
+    ACTUAL_ENCRYPTION_PASSWORD: z.string().optional(),
+    OPENCODE_GO_API_KEY: z.string().optional(),
+    OPENCODE_GO_MODEL: z.string().default('deepseek-v4-flash'),
+    CONFIG_PATH: z.string().default('/config/accounts.yaml'),
+    BANKS_CONFIG_PATH: z.string().default('/config/banks.yaml'),
+    PARSING_CONFIG_PATH: z.string().default('/config/parsing.yaml'),
+    DB_PATH: z.string().default('/data/events.sqlite'),
+    ACTUAL_CACHE_DIR: z.string().default('/actual-cache'),
+    PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+    LOG_LEVEL: z.string().default('info'),
+    MAX_ATTEMPTS: z.coerce.number().int().min(1).default(5),
+    ENRICHMENT_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.7),
+    MAPPING_REFRESH_MINUTES: z.coerce.number().int().min(1).default(60),
+    MANAGEMENT_ENABLED: z
+      .enum(['0', '1'])
+      .default('0')
+      .transform(value => value === '1'),
+    MANAGEMENT_EDIT_ACCOUNTS: z
+      .enum(['0', '1'])
+      .default('0')
+      .transform(value => value === '1'),
+    MANAGEMENT_URL: z
+      .string()
+      .url()
+      .refine(value => {
+        const url = new URL(value);
+        return (
+          url.origin === value &&
+          (url.protocol === 'https:' ||
+            (url.protocol === 'http:' &&
+              ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))
+        );
+      }, 'Use an exact HTTPS origin (HTTP allowed only on loopback)')
+      .optional(),
+    MANAGEMENT_PASSWORD_HASH: z
+      .string()
+      .regex(/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/)
+      .optional(),
+    MANAGEMENT_SECRET: z
+      .string()
+      .regex(/^[a-fA-F0-9]{64}$/)
+      .optional(),
+  })
+  .superRefine((env, context) => {
+    if (
+      env.MANAGEMENT_ENABLED &&
+      (!env.MANAGEMENT_URL || !env.MANAGEMENT_PASSWORD_HASH || !env.MANAGEMENT_SECRET)
+    )
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Management requires an origin, bcrypt password hash and independent 32-byte hex secret',
+      });
+    if (env.MANAGEMENT_EDIT_ACCOUNTS && !env.MANAGEMENT_ENABLED)
+      context.addIssue({
+        code: 'custom',
+        message: 'Account editing requires management to be enabled',
+      });
+  });
 const fileSchema = z.object({
   accounts: z
     .array(
@@ -147,8 +193,8 @@ export async function loadBankConfigFile(path: string): Promise<BankConfig[]> {
   return parseBankConfig(YAML.parse(await readFile(path, 'utf8')));
 }
 
-export async function loadConfigFile(path: string, banks: BankConfig[]): Promise<AppConfigFile> {
-  const config = fileSchema.parse(YAML.parse(await readFile(path, 'utf8')));
+export function parseAccountConfig(value: unknown, banks: BankConfig[]): AppConfigFile {
+  const config = fileSchema.parse(value);
   for (const account of config.accounts) {
     const bank = banks.find(bank => bank.id === account.match.bank);
     if (!bank) throw new Error(`Unknown bank ID: ${account.match.bank}`);
@@ -156,4 +202,8 @@ export async function loadConfigFile(path: string, banks: BankConfig[]): Promise
   }
   validateAccountRules(config.accounts);
   return config;
+}
+
+export async function loadConfigFile(path: string, banks: BankConfig[]): Promise<AppConfigFile> {
+  return parseAccountConfig(YAML.parse(await readFile(path, 'utf8')), banks);
 }

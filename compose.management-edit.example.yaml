@@ -1,0 +1,10 @@
+# Explicit account-editing opt-in, in addition to the management override.
+# First copy your account YAML into config/editable/accounts.yaml and set directory ownership.
+# CONFIG_PATH below deliberately selects that file; the original read-only file is no longer active.
+services:
+  actual-sms:
+    environment:
+      MANAGEMENT_EDIT_ACCOUNTS: '1'
+      CONFIG_PATH: /editable/accounts.yaml
+    volumes:
+      - ./config/editable:/editable:rw

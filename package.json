@@ -18,10 +18,15 @@
     "setup": "sh scripts/setup-docker.sh",
     "setup:host": "node --import tsx src/setup.ts",
     "smoke:actual": "node --import tsx scripts/smoke-actual.ts",
+    "management:password": "node --import tsx src/management/password.ts",
+    "test:web": "npm run build && node --import tsx scripts/smoke-management.ts",
     "smoke:disposable": "npm run build && node dist/scripts/smoke-disposable.js"
   },
   "dependencies": {
     "@actual-app/api": "26.11.0",
+    "@fastify/rate-limit": "^10.3.0",
+    "@fastify/secure-session": "^8.4.2",
+    "bcryptjs": "^3.0.3",
     "better-sqlite3": "^11.10.0",
     "fastify": "^5.12.8",
     "luxon": "^3.7.1",
@@ -30,6 +35,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
+    "@playwright/test": "^1.65.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/luxon": "^3.7.1",
     "@types/node": "^22.17.2",

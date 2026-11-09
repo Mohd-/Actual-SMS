@@ -21,9 +21,9 @@ run_container() {
 if [ -n "$actual_host" ]; then
   run_container --add-host "$actual_host" \
     --volume "$PWD:/setup-output" --workdir /setup-output \
-    --entrypoint tini "$image_name" -- node /app/dist/setup.js "$@"
+    --entrypoint tini "$image_name" -- node /app/dist/src/setup.js "$@"
 else
   run_container \
     --volume "$PWD:/setup-output" --workdir /setup-output \
-    --entrypoint tini "$image_name" -- node /app/dist/setup.js "$@"
+    --entrypoint tini "$image_name" -- node /app/dist/src/setup.js "$@"
 fi
