@@ -10,6 +10,8 @@ import type {
 } from './types.js';
 import { normalizeText, type ParserReason } from './parser.js';
 
+import { MerchantAssignments } from './merchant-assignments.js';
+
 export interface StoredEvent {
   id: string;
   dedupe_key: string;
@@ -62,6 +64,7 @@ export interface InboxSyncEntry {
 
 export class EventStore {
   readonly db: Database.Database;
+  readonly merchantAssignments: MerchantAssignments;
   constructor(path: string) {
     this.db = new Database(path);
     this.db.pragma('journal_mode = WAL');
@@ -83,6 +86,7 @@ export class EventStore {
     CREATE INDEX IF NOT EXISTS enrichment_attempts_event ON enrichment_attempts(event_id,id);
     CREATE INDEX IF NOT EXISTS events_history_page ON events(created_at,id);
   `);
+    this.merchantAssignments = new MerchantAssignments(this.db);
     const columns = this.db.prepare('PRAGMA table_info(events)').all() as { name: string }[];
     if (!columns.some(column => column.name === 'parser_reason'))
       this.db.exec('ALTER TABLE events ADD COLUMN parser_reason TEXT');

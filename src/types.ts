@@ -78,6 +78,7 @@ export interface ResolvedConfig {
   accounts: ResolvedAccount[];
   bankFeesCategoryId: string;
   eligibleCategories: { id: string; name: string }[];
+  expenseCategories?: { id: string; name: string }[];
 }
 export interface ResolvedAccount {
   key: string;
@@ -94,6 +95,7 @@ export interface ActualTransaction {
   category?: string;
   notes?: string;
   imported_id: string;
+  preservePendingAssignment?: true;
   cleared?: boolean;
 }
 /** Frozen account identity, including every routing rule for that account. */

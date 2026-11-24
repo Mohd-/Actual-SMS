@@ -10,6 +10,8 @@ import { ConfigConflict, type ConfigEditor } from '../config-editor.js';
 import { InboxCheckpointConflict, type EventStore } from '../db.js';
 import { eventQuerySchema, eventDetail, listEvents } from '../event-queries.js';
 import { taskerProject } from '../tasker-export.js';
+import { AssignmentConflict } from '../merchant-assignments.js';
+import { merchantKey } from '../merchant-key.js';
 import { ConfigurationError } from '../runtime-config.js';
 import type { ManagementCredentials } from './credentials.js';
 
@@ -73,6 +75,7 @@ export async function registerManagement(
         error: error.message,
         ...(error instanceof InboxCheckpointConflict ? { checkpoint: error.checkpoint } : {}),
       });
+    if (error instanceof AssignmentConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof ConfigurationError) return reply.code(400).send({ error: error.message });
     // Library throttling/body limits retain their status without reflecting request data.
     const statusCode =
@@ -142,6 +145,57 @@ export async function registerManagement(
     await options.runtime.reconnect();
     await options.refresh?.();
     return options.runtime.status();
+  });
+  const assignments = store.merchantAssignments;
+  const assignmentKey = z.object({
+    accountId: z.string().min(1).max(200),
+    merchant: z.string().trim().min(1).max(500).transform(merchantKey).pipe(z.string().min(1)),
+  });
+  const revision = z.string().min(1).max(4000);
+  const categories = () =>
+    options.runtime.config.expenseCategories ?? options.runtime.config.eligibleCategories;
+  app.get('/management/merchant-assignments', async req => {
+    const { search, offset } = z
+      .object({
+        search: z.string().max(200).default(''),
+        offset: z.coerce.number().int().min(0).max(1000000).default(0),
+      })
+      .parse(req.query);
+    const pageSize = 50;
+    const rows = assignments.list(merchantKey(search), offset, pageSize + 1);
+    const accounts = options.runtime.config.accounts.map(({ id, name }) => ({ id, name }));
+    return {
+      rows: rows.slice(0, pageSize),
+      nextOffset: rows.length > pageSize ? offset + pageSize : null,
+      accounts: [...new Map(accounts.map(account => [account.id, account])).values()],
+      categories: categories(),
+    };
+  });
+  app.post('/management/merchant-assignments/save', async (req, reply) => {
+    const { expected, ...input } = assignmentKey
+      .extend({
+        payee: z.string().trim().min(1).max(250),
+        categoryId: z.string().min(1).max(200),
+        expected: revision.nullable(),
+      })
+      .strict()
+      .parse(req.body);
+    if (!options.runtime.config.accounts.some(account => account.id === input.accountId))
+      return reply.code(400).send({ error: 'Select an account configured for SMS imports' });
+    if (!categories().some(category => category.id === input.categoryId))
+      return reply.code(400).send({ error: 'Select an active Actual expense category' });
+    assignments.save(input, expected);
+    options.credentials.audit('merchant-assignment.save', 'success');
+    return { ok: true };
+  });
+  app.post('/management/merchant-assignments/delete', async req => {
+    const { accountId, merchant, expected } = assignmentKey
+      .extend({ expected: revision })
+      .strict()
+      .parse(req.body);
+    assignments.delete(accountId, merchant, expected);
+    options.credentials.audit('merchant-assignment.delete', 'success');
+    return { ok: true };
   });
   app.get('/management/config', async () => options.editor.read());
   const edit = z

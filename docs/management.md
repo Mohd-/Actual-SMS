@@ -69,6 +69,12 @@ Unknown-sender inbox content continues to be discarded rather than retained for 
 
 The upstream `/v1/maintenance` operation remains available only to the legacy operator API key, not browser sessions or restricted Tasker keys. It persists the existing maintenance marker beside the queue database, blocks new engine work, drains imports and mapping refreshes, and shuts down the configured Actual session. A process started with that marker still accepts authenticated SMS into the durable queue but does not connect to Actual. Browser reconnect and YAML activation cannot override maintenance; clear the marker only through the existing deliberate deployment/restart workflow.
 
+## Review merchant assignments
+
+Open **Merchant assignments** to search by merchant or payee and review pending AI suggestions alongside existing assignments. Select a suggestion to review its confidence and reason. Adjust the payee or category as needed and choose **Approve assignment**. While a suggestion is pending, transactions use the parsed payee and have no category.
+
+Each assignment applies to a normalized merchant name on one configured Actual account. You can create assignments using existing Actual categories. A console edit takes precedence over historical learning. Deletion suppresses future learning for that key, and you can create a replacement at any time. Changes apply to future import plans. Correct previously imported transactions in Actual.
+
 ## Edit account routing YAML
 
 The initial editor works directly on the text at `CONFIG_PATH`. It preserves the submitted comments, ordering, advanced routing rules, and unrelated YAML fields. It does not serialize browser account objects into SQLite. You can retain multiple non-overlapping routing rules for one Actual account.

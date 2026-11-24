@@ -49,6 +49,62 @@ export async function managementFixture() {
   return { ...f, store, credentials, app, login };
 }
 describe('optional management authorization', () => {
+  it('lists, approves, edits, deletes and creates merchant assignments with revision checks', async () => {
+    const { app, store, login } = await managementFixture();
+    const base = '/management/merchant-assignments';
+    expect((await app.inject({ url: base })).statusCode).toBe(401);
+    const headers = { origin, cookie: sessionCookie(await login()) };
+    const request = (path: string, payload: Record<string, unknown>) =>
+      app.inject({ method: 'POST', url: `${base}/${path}`, headers, payload });
+    const proposal = store.merchantAssignments.suggest(
+      'checking',
+      'coffee',
+      { payee: 'Coffee Co', categoryId: 'fees', confidence: 0.8, reason: 'test' },
+      'event-1',
+    );
+    const page = await app.inject({ url: `${base}?search=COFFEE`, headers });
+    expect(page.json()).toMatchObject({ rows: [proposal], accounts: [{ id: 'checking' }] });
+    const key = { accountId: 'checking', merchant: 'Coffee', expected: proposal.revision };
+    const edited = { ...key, payee: 'Coffee Company', categoryId: 'fees' };
+    expect((await request('save', { ...edited, categoryId: 'missing' })).statusCode).toBe(400);
+    expect((await request('save', edited)).statusCode).toBe(200);
+    expect((await request('delete', key)).statusCode).toBe(409);
+    const updated = store.merchantAssignments.get('checking', 'coffee')!;
+    expect(updated).toMatchObject({
+      status: 'approved',
+      source: 'manual',
+      payee: 'Coffee Company',
+    });
+    expect((await request('delete', { ...key, expected: updated.revision })).statusCode).toBe(200);
+    expect((await app.inject({ url: base, headers })).json()).toMatchObject({ rows: [] });
+    expect(
+      (await request('save', { ...edited, expected: null, merchant: 'New cafe' })).statusCode,
+    ).toBe(200);
+    expect(store.merchantAssignments.get('checking', 'new cafe')?.status).toBe('approved');
+  });
+
+  it.each(['Coffee-Co', 'CAFÉ', 'Acme   Store', 'متجر-الرياض'])(
+    'finds an assigned payee by normalized search text (%s)',
+    async payee => {
+      const { app, store, login } = await managementFixture();
+      store.merchantAssignments.save(
+        {
+          accountId: 'checking',
+          merchant: 'original description',
+          payee,
+          categoryId: 'fees',
+        },
+        null,
+      );
+      const query = new URLSearchParams({ search: payee });
+      const result = await app.inject({
+        url: `/management/merchant-assignments?${query}`,
+        headers: { cookie: sessionCookie(await login()) },
+      });
+      expect(result.json()).toMatchObject({ rows: [{ merchant: 'original description', payee }] });
+    },
+  );
+
   it('reports a failed live validation without claiming a successful config save', async () => {
     const f = await managementFixture();
     const cookie = sessionCookie(await f.login());

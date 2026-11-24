@@ -2,6 +2,7 @@ import { banks, parsing } from './fixtures/banks.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventStore } from '../src/db.js';
 import { merchantKey, MerchantResolver } from '../src/merchant-resolver.js';
+import { MerchantAssignments } from '../src/merchant-assignments.js';
 import type { ActualAdapter, HistoricalTransaction, ResolvedConfig } from '../src/types.js';
 
 const stores: EventStore[] = [];
@@ -62,7 +63,7 @@ describe('merchant history resolver', () => {
     expect(merchantKey('sample books')).toBe('sample books');
     expect(resolver.lookup('checking-id', 'sample books')).toMatchObject({
       payee: 'Sample Books',
-      category_id: 'shopping',
+      categoryId: 'shopping',
       source: 'actual',
     });
     expect(resolver.lookup('another-account', 'sample books')).toBeUndefined();
@@ -91,8 +92,61 @@ describe('merchant history resolver', () => {
     history[0]!.categoryId = 'shopping';
     await resolver.refresh();
 
-    expect(resolver.lookup('checking-id', 'Cafe')?.category_id).toBe('shopping');
+    expect(resolver.lookup('checking-id', 'Cafe')?.categoryId).toBe('shopping');
     expect(resolver.lookup('checking-id', 'Cafe')?.source).toBe('actual');
+  });
+
+  it('keeps console edits and deletions across Actual history refreshes', async () => {
+    const { store, resolver } = setup([
+      {
+        id: 'transaction-1',
+        accountId: 'checking-id',
+        date: '2026-08-20',
+        payeeName: 'Cafe',
+        categoryId: 'food',
+      },
+    ]);
+    await resolver.refresh();
+    const initial = resolver.lookup('checking-id', 'Cafe')!;
+    const edited = {
+      accountId: 'checking-id',
+      merchant: 'cafe',
+      payee: 'Cafe Central',
+      categoryId: 'shopping',
+    };
+    store.merchantAssignments.save(edited, initial.revision);
+    await resolver.refresh();
+    const current = resolver.lookup('checking-id', 'Cafe')!;
+    expect(current).toMatchObject({ ...edited, status: 'approved', source: 'manual' });
+    store.merchantAssignments.delete(current.accountId, current.merchant, current.revision);
+    await resolver.refresh();
+    expect(resolver.lookup('checking-id', 'Cafe')?.status).toBe('deleted');
+    expect(store.merchantAssignments.list('', 0, 50)).toEqual([]);
+    store.merchantAssignments.save(edited, null);
+    expect(resolver.lookup('checking-id', 'Cafe')?.status).toBe('approved');
+  });
+
+  it('upgrades the existing assignment view while preserving console decisions', () => {
+    const { store } = setup([]);
+    store.db.exec(`
+      DROP VIEW merchant_assignments;
+      CREATE VIEW merchant_assignments AS
+        SELECT accountId, merchant, payee, categoryId, status, source, sourceRef,
+          confidence, reason, revision FROM merchant_assignment_reviews;
+    `);
+    store.merchantAssignments.save(
+      {
+        accountId: 'checking-id',
+        merchant: 'cafe',
+        payee: 'Cafe',
+        categoryId: 'food',
+      },
+      null,
+    );
+
+    const reopened = new MerchantAssignments(store.db);
+
+    expect(reopened.get('checking-id', 'cafe')).toMatchObject({ managed: 1, status: 'approved' });
   });
 
   it('ignores hidden categories', async () => {

@@ -39,6 +39,7 @@ export function resolveConfig(
       return { key: matches[0]!.id, ...matches[0]!, match: mapping.match };
     }),
     bankFeesCategoryId: fee.id,
+    expenseCategories: active.map(({ id, name }) => ({ id, name })),
     eligibleCategories: eligible.map(({ id, name }) => ({ id, name })),
   };
 }

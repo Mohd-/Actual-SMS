@@ -10,7 +10,6 @@
   <body>
     <main>
       <h1>Actual SMS management</h1>
-      <p>Manage the importer. Your YAML files remain authoritative.</p>
       <p id="error" role="alert" hidden></p>
       <form id="login">
         <label
@@ -28,6 +27,7 @@
         <nav aria-label="Management">
           <button data-page="status">Status</button>
           <button data-page="inbox">SMS audit</button>
+          <button data-page="merchants">Merchant assignments</button>
           <button data-page="config">Configuration</button>
           <button data-page="tasker">Tasker</button>
           <button id="logout">Sign out</button>
@@ -69,6 +69,42 @@
           <button id="next" disabled>Next page</button>
           <h3>Authenticated message details</h3>
           <pre id="event-detail">Select a message to view its original input and audit.</pre>
+        </section>
+        <section id="merchants" hidden>
+          <h2>Merchant assignments</h2>
+          <p>
+            Approved assignments apply to future imports. Pending suggestions use the parsed payee
+            and leave the transaction uncategorized.
+          </p>
+          <form id="merchant-filter">
+            <label
+              >Search merchants or payees <input id="merchant-search" type="search" maxlength="200"
+            /></label>
+            <button>Search</button>
+          </form>
+          <p id="merchant-count" role="status"></p>
+          <ul id="merchant-list"></ul>
+          <button id="merchant-previous" disabled>Previous page</button>
+          <button id="merchant-next" disabled>Next page</button>
+          <button id="merchant-new">Create assignment</button>
+          <form id="merchant-form" hidden>
+            <h3 id="merchant-form-title"></h3>
+            <p id="merchant-source"></p>
+            <label
+              >Account
+              <select id="merchant-account" required></select
+            ></label>
+            <label
+              >Merchant as it appears in the SMS <input id="merchant-name" maxlength="500" required
+            /></label>
+            <label>Assigned payee <input id="merchant-payee" maxlength="250" required /></label>
+            <label
+              >Actual category
+              <select id="merchant-category" required></select
+            ></label>
+            <button id="merchant-save">Save assignment</button>
+            <button id="merchant-delete" type="button" hidden>Delete assignment</button>
+          </form>
         </section>
         <section id="config" hidden>
           <h2>YAML configuration</h2>

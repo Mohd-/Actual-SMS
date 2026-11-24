@@ -5,12 +5,12 @@ import type {
   ParsedTransaction,
   ResolvedConfig,
   SmsInput,
-  AiSuggestion,
 } from './types.js';
 import { EventStore, type StoredEvent, type ImportExecution } from './db.js';
 import { PARSER_REVISION, parseSms } from './parser.js';
 import { resolveAccount, resolveBillPaymentAccount, resolveTransferAccount } from './routing.js';
-import { MerchantResolver, merchantKey } from './merchant-resolver.js';
+import { MerchantResolver } from './merchant-resolver.js';
+import { merchantKey } from './merchant-key.js';
 import { importId } from './import-identity.js';
 import { WorkGate } from './work-gate.js';
 import {
@@ -31,7 +31,7 @@ export class Processor {
     private ai: Enricher,
     private config: ResolvedConfig,
     private maxAttempts = 5,
-    private minConfidence = 0.7,
+    minConfidence = 0.7,
     merchantResolver?: MerchantResolver,
     private gate = new WorkGate(),
   ) {
@@ -212,25 +212,14 @@ export class Processor {
       review = true;
     }
     this.store.update(event.id, 'processing', { parsed: tx, parserRevision: PARSER_REVISION });
-    let suggestion: AiSuggestion | null = null;
     let selectedPayee = tx.payee;
     let selectedCategory: string | undefined;
+    let preservePendingAssignment = false;
     if (!isTransfer && tx.kind !== 'withdrawal') {
-      const mapping = this.merchantResolver.lookup(account.id, tx.payee);
-      if (mapping) {
-        selectedPayee = mapping.payee;
-        selectedCategory = mapping.category_id;
-        this.store.recordEnrichment(event.id, 'history_hit', {
-          merchant: tx.payee,
-          merchantKey: mapping.merchant_key,
-          accountId: account.id,
-          payee: mapping.payee,
-          categoryId: mapping.category_id,
-          source: mapping.source,
-          sourceRef: mapping.source_ref,
-          decisionAt: mapping.decision_at,
-        });
-      } else {
+      const merchant = merchantKey(tx.payee);
+      let assignment = merchant ? this.merchantResolver.lookup(account.id, tx.payee) : undefined;
+      if (merchant && (!assignment || this.merchantResolver.canReplaceHistory(assignment))) {
+        assignment = undefined;
         const request = {
           merchant: tx.payee,
           location: input.location,
@@ -239,7 +228,7 @@ export class Processor {
         };
         this.store.recordEnrichment(event.id, 'history_miss', {
           merchant: tx.payee,
-          merchantKey: merchantKey(tx.payee),
+          merchantKey: merchant,
           accountId: account.id,
         });
         const started = Date.now();
@@ -249,28 +238,43 @@ export class Processor {
           error: error instanceof Error ? error.message : String(error),
         }));
         if (enrichment.status === 'success') {
-          suggestion = enrichment.suggestion;
-          selectedPayee = suggestion.payee;
-          const applied = suggestion.confidence >= this.minConfidence;
-          if (applied) {
-            selectedCategory = suggestion.categoryId;
-            this.merchantResolver.learnLocal(account.id, tx.payee, suggestion, event.id);
-          }
-          this.store.update(event.id, 'processing', { suggestion });
-          this.store.recordEnrichment(event.id, applied ? 'llm_success' : 'llm_low_confidence', {
-            request,
-            result: bounded(enrichment),
-            threshold: this.minConfidence,
-            payeeApplied: true,
-            categoryApplied: applied,
-          });
+          this.store.merchantAssignments.suggest(
+            account.id,
+            merchant,
+            enrichment.suggestion,
+            event.id,
+            candidate => this.merchantResolver.canReplaceHistory(candidate),
+          );
+          assignment = this.merchantResolver.lookup(account.id, tx.payee);
         } else {
           this.store.recordEnrichment(event.id, `llm_${enrichment.status}`, {
             request,
             result: bounded(enrichment),
-            threshold: this.minConfidence,
           });
         }
+      }
+      preservePendingAssignment = assignment?.status === 'pending';
+      const applied = assignment && this.merchantResolver.canApply(assignment);
+      if (assignment && applied) {
+        selectedPayee = assignment.payee;
+        selectedCategory = assignment.categoryId;
+      }
+      if (assignment) {
+        const status = {
+          approved: applied ? 'history_hit' : 'merchant_assignment_category_unavailable',
+          pending: 'merchant_assignment_pending',
+          deleted: 'merchant_assignment_deleted',
+        }[assignment.status];
+        this.store.recordEnrichment(event.id, status, {
+          merchant: tx.payee,
+          merchantKey: merchant,
+          accountId: account.id,
+          payee: assignment.payee,
+          categoryId: assignment.categoryId,
+          source: assignment.source,
+          sourceRef: assignment.sourceRef,
+          confidence: assignment.confidence,
+        });
       }
     } else {
       this.store.recordEnrichment(event.id, 'not_applicable', {
@@ -377,6 +381,7 @@ export class Processor {
           payee_name: selectedPayee,
           imported_payee: tx.payee,
           category: selectedCategory,
+          ...(preservePendingAssignment ? { preservePendingAssignment: true } : {}),
           notes,
           imported_id: id(),
         },

@@ -75,6 +75,12 @@ export class ActualApiAdapter implements ActualAdapter {
   }
   async importTransactions(accountId: string, transactions: ActualTransaction[]) {
     const actual = await loadActualApi();
-    return actual.importTransactions(accountId, transactions as any, { defaultCleared: true });
+    const pending = transactions.some(transaction => transaction.preservePendingAssignment);
+    if (pending && !('actualSmsPendingAssignmentImport' in actual))
+      throw new Error('Actual SDK pending-assignment import support is missing');
+    return actual.importTransactions(accountId, transactions as any, {
+      defaultCleared: true,
+      ...(pending ? { payeeNameNormalization: 'original' } : {}),
+    });
   }
 }

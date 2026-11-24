@@ -176,6 +176,81 @@ async function main() {
           (await actual.getTransactions(checking, '2026-08-22', '2026-08-22')).length,
           transactions.length,
         );
+        const rulePayee = await actual.createPayee({ name: 'Rule-selected Payee' });
+        await actual.createRule({
+          stage: 'pre',
+          conditionsOp: 'and',
+          conditions: [{ op: 'is', field: 'imported_payee', value: 'RULETARGET' }],
+          actions: [
+            { op: 'set', field: 'payee', value: rulePayee },
+            { op: 'set', field: 'category', value: fees },
+          ],
+        });
+        const enqueuePurchase = (eventId: string, amount: number, merchant: string) =>
+          store.enqueue({
+            eventId,
+            sender: 'SAB',
+            receivedAt,
+            message: `Purchase Card **1234 Amount SAR ${amount} at ${merchant} on 2026-08-22 00:30`,
+          });
+        enqueuePurchase('rule-control', 71, 'RULETARGET');
+        await processor.tick();
+
+        const enqueuePending = (eventId: string, amount: number, merchant: string) => {
+          store.merchantAssignments.suggest(
+            checking,
+            merchant.toLowerCase(),
+            {
+              payee: 'Proposed Name',
+              categoryId: fees,
+              confidence: 0.8,
+              reason: 'Smoke test',
+            },
+            eventId,
+          );
+          enqueuePurchase(eventId, amount, merchant);
+        };
+        enqueuePending('pending-rule', 72, 'RULETARGET');
+        enqueuePending('pending-no-rule', 73, 'NORULE');
+        const importTransactions = adapter.importTransactions.bind(adapter);
+        adapter.importTransactions = async (accountId, rows) => {
+          const result = await importTransactions(accountId, rows);
+          adapter.importTransactions = importTransactions;
+          throw new Error(
+            `Simulated lost import response after writing ${result.added.length} transaction`,
+          );
+        };
+        await processor.tick();
+        assert.equal(store.get('pending-rule')?.status, 'queued');
+        // Sync the first write before retrying to verify there is no miscategorized interim write.
+        await actual.sync();
+        const pendingRows = () => actual.getTransactions(checking, '2026-08-22', '2026-08-22');
+        const first = (await pendingRows()).filter(tx => tx.amount === -7200);
+        assert.equal(first.length, 1);
+        assert.equal(first[0]?.category, null);
+        assert.equal(
+          (await actual.getPayees()).find(payee => payee.id === first[0]?.payee)?.name,
+          'RULETARGET',
+        );
+        store.update('pending-rule', 'queued', { nextAttemptAt: new Date(0).toISOString() });
+        const restarted = new Processor(store, adapter, new NoopEnricher(), config);
+        await restarted.tick();
+        await restarted.tick();
+        assert.equal(store.get('pending-rule')?.status, 'imported');
+        assert.equal(store.get('pending-no-rule')?.status, 'imported');
+
+        const finalRows = await pendingRows();
+        const control = finalRows.find(tx => tx.amount === -7100);
+        assert.equal(control?.category, fees);
+        assert.equal(control?.payee, rulePayee);
+        assert.equal(finalRows.filter(tx => tx.amount === -7200).length, 1);
+        assert.equal(finalRows.find(tx => tx.amount === -7200)?.id, first[0]?.id);
+        const unrelated = finalRows.find(tx => tx.amount === -7300);
+        assert.equal(unrelated?.category, null);
+        assert.equal(
+          (await actual.getPayees()).find(payee => payee.id === unrelated?.payee)?.name,
+          'NORULE',
+        );
         passed = true;
       } finally {
         store.close();
@@ -199,6 +274,7 @@ async function main() {
               'linked-transfer',
               'bank-fee',
               'retry-idempotency',
+              'pending-merchant-assignment-bypasses-actual-rules',
               'existing-budget-catalog-preserved',
             ],
           },

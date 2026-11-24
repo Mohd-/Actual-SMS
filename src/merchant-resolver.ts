@@ -4,24 +4,14 @@ import type {
   HistoricalTransaction,
   ResolvedConfig,
 } from './types.js';
-import { EventStore, type MerchantMapping } from './db.js';
+import { EventStore } from './db.js';
+import type { MerchantAssignment } from './merchant-assignments.js';
 import { resolveAccount } from './routing.js';
 
-const arabicDigits = '٠١٢٣٤٥٦٧٨٩';
-
-export function merchantKey(value: string): string {
-  return value
-    .normalize('NFKC')
-    .replace(/[٠-٩]/gu, digit => String(arabicDigits.indexOf(digit)))
-    .toLocaleLowerCase('en-US')
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .replace(/\s+/gu, ' ')
-    .trim();
-}
+import { merchantKey } from './merchant-key.js';
+export { merchantKey } from './merchant-key.js';
 
 export class MerchantResolver {
-  private activeCategoryIds = new Set<string>();
-  private categoriesLoaded = false;
   private refreshing?: Promise<void>;
 
   constructor(
@@ -31,11 +21,19 @@ export class MerchantResolver {
     private minConfidence: number,
   ) {}
 
-  lookup(accountId: string, merchant: string): MerchantMapping | undefined {
-    const mapping = this.store.mapping(accountId, merchantKey(merchant));
-    return mapping && (!this.categoriesLoaded || this.activeCategoryIds.has(mapping.category_id))
-      ? mapping
-      : undefined;
+  lookup(accountId: string, merchant: string): MerchantAssignment | undefined {
+    return this.store.merchantAssignments.get(accountId, merchantKey(merchant));
+  }
+
+  canApply(assignment: MerchantAssignment) {
+    if (assignment.status !== 'approved') return false;
+    return (
+      this.config.expenseCategories?.some(category => category.id === assignment.categoryId) ?? true
+    );
+  }
+
+  canReplaceHistory(assignment: MerchantAssignment) {
+    return !assignment.managed && !this.canApply(assignment);
   }
 
   learnLocal(
@@ -66,12 +64,9 @@ export class MerchantResolver {
   private async performRefresh() {
     await this.actual.sync();
     const categories = await this.actual.categories();
-    this.activeCategoryIds = new Set(
-      categories
-        .filter(category => !category.isIncome && !category.hidden)
-        .map(category => category.id),
-    );
-    this.categoriesLoaded = true;
+    const active = categories.filter(category => !category.isIncome && !category.hidden);
+    const activeCategoryIds = new Set(active.map(category => category.id));
+    this.config.expenseCategories = active.map(({ id, name }) => ({ id, name }));
     this.seedLocalMappings();
     const accountIds = [...new Set(this.config.accounts.map(account => account.id))];
     const end = new Date().toISOString().slice(0, 10);
@@ -80,15 +75,15 @@ export class MerchantResolver {
     );
     const observations = histories
       .flat()
-      .map(transaction => this.observation(transaction))
+      .map(transaction => this.observation(transaction, activeCategoryIds))
       .filter(observation => observation !== undefined);
     this.store.replaceActualMappings(observations, new Date().toISOString());
   }
 
-  private observation(transaction: HistoricalTransaction) {
+  private observation(transaction: HistoricalTransaction, activeCategoryIds: Set<string>) {
     if (
       !transaction.categoryId ||
-      !this.activeCategoryIds.has(transaction.categoryId) ||
+      !activeCategoryIds.has(transaction.categoryId) ||
       transaction.transferId
     )
       return undefined;

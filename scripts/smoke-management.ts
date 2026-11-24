@@ -52,6 +52,27 @@ try {
     '<script>globalThis.injected=true</script>',
   );
   expect(await page.evaluate(() => Object.hasOwn(globalThis, 'injected'))).toBe(false);
+  store.merchantAssignments.suggest(
+    'checking',
+    'example cafe',
+    { payee: 'Example Cafe', categoryId: 'fees', confidence: 0.85, reason: 'Smoke test' },
+    id,
+  );
+  await page.getByRole('button', { name: 'Merchant assignments', exact: true }).click();
+  await page.getByRole('button', { name: /example cafe.*Pending/ }).click();
+  await expect(page.locator('#merchant-source')).toContainText('85%');
+  await page.getByLabel('Assigned payee').fill('Cafe Central');
+  await page.getByRole('button', { name: 'Approve assignment', exact: true }).click();
+  await page.getByRole('button', { name: /Cafe Central.*Approved/ }).click();
+  await page.getByRole('button', { name: 'Delete assignment', exact: true }).click();
+  await expect(page.locator('#merchant-count')).toHaveText('No assignments found.');
+  await page.getByRole('button', { name: 'Create assignment', exact: true }).click();
+  await page.locator('#merchant-account').selectOption('checking');
+  await page.getByLabel('Merchant as it appears in the SMS').fill('Example Cafe');
+  await page.getByLabel('Assigned payee').fill('Original Cafe');
+  await page.locator('#merchant-category').selectOption('fees');
+  await page.getByRole('button', { name: 'Save assignment', exact: true }).click();
+  await expect(page.getByRole('button', { name: /Original Cafe.*Approved/ })).toBeVisible();
   await page.getByRole('button', { name: 'Configuration', exact: true }).click();
   const accounts = page.getByLabel('Account routing YAML');
   await expect(accounts).toHaveValue(/1234/);

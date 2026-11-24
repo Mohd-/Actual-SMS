@@ -109,7 +109,7 @@ Restart the service after changing configuration. Keep `.env` and `config/accoun
 
 If you'd rather edit the files yourself, copy `.env.example` to `.env` and `config/accounts.example.yaml` to `config/accounts.yaml`. Replace all example names and suffixes with your own, and remove unused account entries. Account and category names must exactly match existing, open entries in Actual.
 
-Leave `OPENCODE_GO_API_KEY` empty to turn off AI suggestions. `ENRICHMENT_MIN_CONFIDENCE` defaults to `0.70`. `MAPPING_REFRESH_MINUTES` controls how often the service learns category changes you've made in Actual; the default is 60 minutes.
+Leave `OPENCODE_GO_API_KEY` empty to turn off AI suggestions. `MAPPING_REFRESH_MINUTES` controls how often the service learns category changes you've made in Actual; the default is 60 minutes.
 
 You can also run the wizard with `npm run setup:host` if you've successfully installed the host dependencies, including Actual's native SQLite module.
 
@@ -275,13 +275,11 @@ The Tasker SQL query uses `|~sms~|` as its column divider. The server also accep
 
 ## Merchant names, categories, and privacy
 
-Before asking AI for help, the service looks for an exact match on the normalized merchant name and Actual account. It learns these mappings from categorized Actual transactions, your manual corrections, and successful SMS enrichments. Actual history refreshes at startup and every hour by default. A match reuses the previous payee and category without an AI request; any active expense category can be reused.
+The service matches normalized merchant text and the Actual account. Existing assignments learned from categorized Actual transactions and earlier enrichments continue to apply. History refreshes at startup and every hour by default. An active approved assignment reuses its payee and category without an AI request.
 
-If there's no match and you've configured `OPENCODE_GO_API_KEY`, the service asks OpenCode Go for a merchant name and category suggestion. It sends only normalized merchant text, optional exact location/time context, and the configured eligible category IDs and names. It doesn't send raw SMS, balances, account suffixes, aliases, or unrelated personal data.
+For a new merchant, OpenCode Go can propose a payee and a category from the eligible categories. The service sends the merchant text, optional location and transaction time, and eligible category names and IDs. The default model is `deepseek-v4-flash`; set `OPENCODE_GO_MODEL` to select another. Provider errors leave the transaction eligible for ordinary import.
 
-The default model is `deepseek-v4-flash`; change it with `OPENCODE_GO_MODEL`. Requests use OpenCode's OpenAI-compatible Chat Completions endpoint in JSON-only mode, and responses are validated locally. This step uses the model without web search.
-
-A category is applied only when confidence meets `ENRICHMENT_MIN_CONFIDENCE`, which defaults to `0.70`. A lower-confidence suggestion may still clean up the payee name. Provider failures, invalid output, quota limits, rate limits, and timeouts don't prevent an otherwise valid transaction from importing. Sanitized requests, responses, timings, outcomes, and failure details are saved in the event audit.
+AI suggestions are saved in SQLite for review. While a suggestion is pending, transactions import with the parsed payee and no category. In the management console, open **Merchant assignments** to approve or edit suggestions and to create, edit, or delete assignments. Approved assignments apply to future imports. Deleting an assignment suppresses automatic learning for that merchant and account until you create a replacement.
 
 ### What stays on your server
 
@@ -341,6 +339,8 @@ npm run smoke:actual
 To include the OpenCode Go smoke test in the test run, set `LIVE_OPENCODE_GO_TEST=1` and an explicit `OPENCODE_GO_API_KEY`.
 
 ### Upgrading Actual
+
+Dependency installation checks and applies the pending-assignment reconciliation adjustment to the pinned SDK. If the reconciliation code changes, review the adjustment in `scripts/patch-actual-sdk.mjs` and rerun the disposable smoke test with an Actual rule that would otherwise rename and categorize a pending transaction.
 
 The `@actual-app/api` dependency is pinned to **26.11.0** to match the deployed Actual server. Startup reads the installed API version and checks server metadata before opening the budget. Mismatches and discovery failures block imports. Authentication, download, and migration failures also prevent startup.
 
