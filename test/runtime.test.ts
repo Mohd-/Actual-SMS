@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { runtimeFixture } from './fixtures/runtime.js';
 import { Processor } from '../src/processor.js';
 import { EventStore } from '../src/db.js';
-import { NoopEnricher } from '../src/enricher.js';
 import { ConfigurationError } from '../src/runtime-config.js';
 import { Runtime } from '../src/runtime.js';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -55,7 +54,7 @@ describe('configured runtime lifecycle', () => {
     const f = await runtimeFixture();
     const store = new EventStore(':memory:');
     try {
-      const processor = new Processor(store, f.actual, new NoopEnricher(), f.config);
+      const processor = new Processor(store, f.actual, f.config);
       await processor.stop();
       store.enqueue({
         eventId: 'after-stop',
@@ -94,11 +93,10 @@ describe('configured runtime lifecycle', () => {
       const processor = new Processor(
         store,
         f.actual,
-        new NoopEnricher(),
+
         f.config,
         5,
-        0.7,
-        undefined,
+
         f.runtime.gate,
       );
       const { id } = store.enqueue({
@@ -135,11 +133,10 @@ describe('configured runtime lifecycle', () => {
       const processor = new Processor(
         store,
         f.actual,
-        new NoopEnricher(),
+
         f.config,
         5,
-        0.7,
-        undefined,
+
         f.runtime.gate,
       );
       store.enqueue({
@@ -164,7 +161,7 @@ describe('configured runtime lifecycle', () => {
       await f.cleanup();
     }
   });
-  it('drains mapping refreshes and permanently blocks work after shutdown', async () => {
+  it('drains payee catalog refreshes and permanently blocks work after shutdown', async () => {
     const f = await runtimeFixture(),
       store = new EventStore(':memory:'),
       started = deferred(),
@@ -181,14 +178,13 @@ describe('configured runtime lifecycle', () => {
       const processor = new Processor(
         store,
         f.actual,
-        new NoopEnricher(),
+
         f.config,
         5,
-        0.7,
-        undefined,
+
         f.runtime.gate,
       );
-      const refresh = processor.refreshMappings();
+      const refresh = processor.refreshPayees();
       await started.promise;
       const stop = f.runtime.shutdown();
       expect(closed).toBe(false);

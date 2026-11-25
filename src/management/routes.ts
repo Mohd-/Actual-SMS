@@ -10,7 +10,8 @@ import { ConfigConflict, type ConfigEditor } from '../config-editor.js';
 import { InboxCheckpointConflict, type EventStore } from '../db.js';
 import { eventQuerySchema, eventDetail, listEvents } from '../event-queries.js';
 import { taskerProject } from '../tasker-export.js';
-import { AssignmentConflict } from '../merchant-assignments.js';
+import { PayeeConflict } from '../payees.js';
+import type { PayeeSuggestions } from '../enricher.js';
 import { merchantKey } from '../merchant-key.js';
 import { ConfigurationError } from '../runtime-config.js';
 import type { ManagementCredentials } from './credentials.js';
@@ -29,6 +30,7 @@ export interface ManagementOptions {
   passwordHash: string;
   secret: string;
   refresh?: () => Promise<void>;
+  suggestions?: PayeeSuggestions;
 }
 export async function registerManagement(
   app: FastifyInstance,
@@ -75,7 +77,7 @@ export async function registerManagement(
         error: error.message,
         ...(error instanceof InboxCheckpointConflict ? { checkpoint: error.checkpoint } : {}),
       });
-    if (error instanceof AssignmentConflict) return reply.code(409).send({ error: error.message });
+    if (error instanceof PayeeConflict) return reply.code(409).send({ error: error.message });
     if (error instanceof ConfigurationError) return reply.code(400).send({ error: error.message });
     // Library throttling/body limits retain their status without reflecting request data.
     const statusCode =
@@ -127,10 +129,16 @@ export async function registerManagement(
     req.session.delete();
     return { ok: true };
   });
-  app.get('/management/status', async () => ({
-    ...options.runtime.status(),
-    counts: store.counts(),
-  }));
+  app.get('/management/status', async () => {
+    const status = options.runtime.status();
+    const payeeMigrationPending = store.payees.migrationPending;
+    return {
+      ...status,
+      ready: status.ready && !payeeMigrationPending,
+      counts: store.counts(),
+      payeeMigrationPending,
+    };
+  });
   app.get('/management/events', async (req, reply) => {
     const query = eventQuerySchema.safeParse(req.query);
     if (!query.success) return reply.code(400).send({ error: 'Invalid filters' });
@@ -146,57 +154,104 @@ export async function registerManagement(
     await options.refresh?.();
     return options.runtime.status();
   });
-  const assignments = store.merchantAssignments;
-  const assignmentKey = z.object({
-    accountId: z.string().min(1).max(200),
-    merchant: z.string().trim().min(1).max(500).transform(merchantKey).pipe(z.string().min(1)),
-  });
-  const revision = z.string().min(1).max(4000);
-  const categories = () =>
-    options.runtime.config.expenseCategories ?? options.runtime.config.eligibleCategories;
-  app.get('/management/merchant-assignments', async req => {
+  const payees = store.payees;
+  const editPayees = () => options.runtime.status().ready && !payees.migrationPending;
+  const rowId = z.string().uuid();
+  const revision = z.string().uuid();
+  const descriptor = z.string().min(1).max(20_000).transform(merchantKey).pipe(z.string().min(1));
+  app.get('/management/payees', async req => {
     const { search, offset } = z
       .object({
         search: z.string().max(200).default(''),
         offset: z.coerce.number().int().min(0).max(1000000).default(0),
       })
       .parse(req.query);
-    const pageSize = 50;
-    const rows = assignments.list(merchantKey(search), offset, pageSize + 1);
+    const rows = payees.list(merchantKey(search), offset, 51);
     const accounts = options.runtime.config.accounts.map(({ id, name }) => ({ id, name }));
     return {
-      rows: rows.slice(0, pageSize),
-      nextOffset: rows.length > pageSize ? offset + pageSize : null,
+      rows: rows.slice(0, 50),
+      nextOffset: rows.length > 50 ? offset + 50 : null,
+      ...payees.catalog,
       accounts: [...new Map(accounts.map(account => [account.id, account])).values()],
-      categories: categories(),
+      editable: editPayees(),
+      migrationPending: payees.migrationPending,
+      suggestions: Boolean(options.suggestions),
     };
   });
-  app.post('/management/merchant-assignments/save', async (req, reply) => {
-    const { expected, ...input } = assignmentKey
-      .extend({
-        payee: z.string().trim().min(1).max(250),
-        categoryId: z.string().min(1).max(200),
-        expected: revision.nullable(),
+  const requirePayees = async (_req: unknown, reply: import('fastify').FastifyReply) => {
+    if (!editPayees()) return reply.code(503).send({ error: 'Connect to Actual to edit payees.' });
+  };
+  app.post('/management/payees/save', { preHandler: requirePayees }, async req => {
+    const input = z
+      .object({
+        id: rowId,
+        revision,
+        categoryId: z.string().min(1).max(200).nullable(),
+        tagIds: z.array(z.string().min(1).max(200)).max(100),
+        resolveCategoryConflict: z.boolean().optional(),
       })
       .strict()
       .parse(req.body);
-    if (!options.runtime.config.accounts.some(account => account.id === input.accountId))
-      return reply.code(400).send({ error: 'Select an account configured for SMS imports' });
-    if (!categories().some(category => category.id === input.categoryId))
-      return reply.code(400).send({ error: 'Select an active Actual expense category' });
-    assignments.save(input, expected);
-    options.credentials.audit('merchant-assignment.save', 'success');
+    payees.save(
+      input.id,
+      input.revision,
+      input.categoryId,
+      input.tagIds,
+      input.resolveCategoryConflict,
+    );
+    options.credentials.audit('payee.save', 'success');
     return { ok: true };
   });
-  app.post('/management/merchant-assignments/delete', async req => {
-    const { accountId, merchant, expected } = assignmentKey
-      .extend({ expected: revision })
+  app.post('/management/payees/link', { preHandler: requirePayees }, async req => {
+    const input = z
+      .object({
+        key: descriptor.nullable(),
+        id: rowId,
+        revision,
+        targetId: rowId,
+        targetRevision: revision,
+      })
       .strict()
       .parse(req.body);
-    assignments.delete(accountId, merchant, expected);
-    options.credentials.audit('merchant-assignment.delete', 'success');
+    payees.link(input.key, input.id, input.revision, input.targetId, input.targetRevision);
+    options.credentials.audit('payee.link', 'success');
     return { ok: true };
   });
+  app.post('/management/payees/unlink', { preHandler: requirePayees }, async req => {
+    const input = z.object({ key: descriptor, id: rowId, revision }).strict().parse(req.body);
+    payees.unlink(input.key, input.id, input.revision);
+    options.credentials.audit('payee.unlink', 'success');
+    return { ok: true };
+  });
+  app.post(
+    '/management/payees/suggestion',
+    {
+      preHandler: requirePayees,
+      config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+    },
+    async (req, reply) => {
+      const { id, revision: expected } = z.object({ id: rowId, revision }).strict().parse(req.body);
+      const row = payees.get(id);
+      if (!row || row.revision !== expected)
+        return reply.code(409).send({ error: 'Payee changed. Refresh the list and try again.' });
+      if (row.categoryId || row.unavailable || !options.suggestions) return { suggestion: null };
+      const eligibleIds = new Set(
+        options.runtime.config.eligibleCategories.map(category => category.id),
+      );
+      const categories = payees.catalog.categories
+        .filter(category => eligibleIds.has(category.id))
+        .map(({ id, name }) => ({ id, name }));
+      const suggestion = await options.suggestions.suggest(row.name, categories);
+      const current = payees.get(id);
+      return {
+        suggestion:
+          current?.revision === expected &&
+          payees.catalog.categories.some(category => category.id === suggestion?.categoryId)
+            ? suggestion
+            : null,
+      };
+    },
+  );
   app.get('/management/config', async () => options.editor.read());
   const edit = z
     .object({

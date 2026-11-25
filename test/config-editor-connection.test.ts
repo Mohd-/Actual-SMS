@@ -3,7 +3,6 @@ import { readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { ConfigEditor } from '../src/config-editor.js';
 import { EventStore } from '../src/db.js';
 import { Processor } from '../src/processor.js';
-import { NoopEnricher } from '../src/enricher.js';
 import { runtimeFixture } from './fixtures/runtime.js';
 
 function deferred() {
@@ -50,11 +49,10 @@ describe('connected configuration validation', () => {
         const processor = new Processor(
           store,
           f.actual,
-          new NoopEnricher(),
+
           f.config,
           5,
-          0.7,
-          undefined,
+
           f.runtime.gate,
         );
         store.enqueue({
@@ -62,7 +60,7 @@ describe('connected configuration validation', () => {
           message: 'Purchase Card:1234 Amount: SAR 10 at Coffee',
           receivedAt: '2026-08-22T10:00:00+03:00',
         });
-        const work = operation === 'import' ? processor.tick() : processor.refreshMappings();
+        const work = operation === 'import' ? processor.tick() : processor.refreshPayees();
         await started.promise;
         const save = editor.save(initial.accounts.replace('1234', '4321'), initial.revision);
         expect(reads).toBe(0);
@@ -175,11 +173,10 @@ describe('connected configuration validation', () => {
       const processor = new Processor(
         store,
         f.actual,
-        new NoopEnricher(),
+
         f.config,
         5,
-        0.7,
-        undefined,
+
         f.runtime.gate,
       );
       const { id } = store.enqueue({
@@ -190,7 +187,7 @@ describe('connected configuration validation', () => {
       const preview = editor.preview(initial.accounts, initial.revision);
       await started.promise;
       await processor.tick();
-      await processor.refreshMappings();
+      await processor.refreshPayees();
       expect(syncCalls).toBe(1);
       expect(store.get(id)).toMatchObject({ status: 'queued', attempts: 0 });
       await expect(f.runtime.reconnect()).rejects.toThrow('in progress');
@@ -262,11 +259,10 @@ describe('connected configuration validation', () => {
         await new Processor(
           store,
           f.actual,
-          new NoopEnricher(),
+
           f.config,
           5,
-          0.7,
-          undefined,
+
           f.runtime.gate,
         ).tick();
         expect(store.get(id)).toMatchObject({ status: 'queued', attempts: 0 });

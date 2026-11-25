@@ -6,6 +6,7 @@ import { runtimeFixture } from '../test/fixtures/runtime.js';
 import { EventStore } from '../src/db.js';
 import { ConfigEditor } from '../src/config-editor.js';
 import { ManagementCredentials } from '../src/management/credentials.js';
+import { PayeeSuggestions } from '../src/enricher.js';
 import { buildServer } from '../src/server.js';
 import type { Processor } from '../src/processor.js';
 
@@ -15,6 +16,19 @@ const credentials = new ManagementCredentials(store.db);
 const origin = 'http://127.0.0.1:43123';
 const options = {
   runtime: f.runtime,
+  suggestions: new PayeeSuggestions(
+    {
+      enrich: async () => ({
+        status: 'success',
+        suggestion: { categoryId: 'food', confidence: 0.91, reason: 'Coffee shop' },
+        model: 'fake',
+        durationMs: 0,
+        httpStatus: 200,
+        response: {},
+      }),
+    },
+    0.7,
+  ),
   editor: new ConfigEditor(f.runtime, true),
   credentials,
   origin,
@@ -52,27 +66,62 @@ try {
     '<script>globalThis.injected=true</script>',
   );
   expect(await page.evaluate(() => Object.hasOwn(globalThis, 'injected'))).toBe(false);
-  store.merchantAssignments.suggest(
-    'checking',
-    'example cafe',
-    { payee: 'Example Cafe', categoryId: 'fees', confidence: 0.85, reason: 'Smoke test' },
-    id,
-  );
-  await page.getByRole('button', { name: 'Merchant assignments', exact: true }).click();
-  await page.getByRole('button', { name: /example cafe.*Pending/ }).click();
-  await expect(page.locator('#merchant-source')).toContainText('85%');
-  await page.getByLabel('Assigned payee').fill('Cafe Central');
-  await page.getByRole('button', { name: 'Approve assignment', exact: true }).click();
-  await page.getByRole('button', { name: /Cafe Central.*Approved/ }).click();
-  await page.getByRole('button', { name: 'Delete assignment', exact: true }).click();
-  await expect(page.locator('#merchant-count')).toHaveText('No assignments found.');
-  await page.getByRole('button', { name: 'Create assignment', exact: true }).click();
-  await page.locator('#merchant-account').selectOption('checking');
-  await page.getByLabel('Merchant as it appears in the SMS').fill('Example Cafe');
-  await page.getByLabel('Assigned payee').fill('Original Cafe');
-  await page.locator('#merchant-category').selectOption('fees');
-  await page.getByRole('button', { name: 'Save assignment', exact: true }).click();
-  await expect(page.getByRole('button', { name: /Original Cafe.*Approved/ })).toBeVisible();
+  f.config.eligibleCategories = [{ id: 'food', name: 'Food' }];
+  store.db.exec(`
+    CREATE TABLE merchant_assignment_reviews (accountId TEXT, merchant TEXT, payee TEXT, categoryId TEXT, status TEXT, sourceRef TEXT);
+    INSERT INTO merchant_assignment_reviews VALUES ('checking','split descriptor','Cafe Central','food','approved',NULL);
+    INSERT INTO merchant_assignment_reviews VALUES ('credit','split descriptor','Another Cafe','other','approved',NULL);
+  `);
+  store.payees.refresh({
+    payees: [
+      { id: 'cafe', name: 'Cafe Central' },
+      { id: 'other-cafe', name: 'Another Cafe' },
+    ],
+    categories: [...f.config.eligibleCategories, { id: 'other', name: 'Other' }],
+    tags: [{ id: 'work', name: 'work' }],
+  });
+  const mainCafe = store.payees.list('cafe central', 0, 1)[0]!;
+  store.payees.save(mainCafe.id, mainCafe.revision, null, []);
+  store.payees.defaults('Example Cafe');
+  await page.getByRole('button', { name: 'Payees', exact: true }).click();
+  await page.getByRole('button', { name: 'Example Cafe · No category', exact: true }).click();
+  await expect(page.locator('#payee-suggestion')).toContainText('Food · Coffee shop');
+  await page.getByRole('button', { name: 'Use suggestion', exact: true }).click();
+  expect(store.payees.list('example cafe', 0, 1)[0]?.categoryId).toBeNull();
+  await page.getByRole('button', { name: 'Save defaults', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: 'Example Cafe · Food', exact: true }),
+  ).toBeVisible();
+  await page.getByLabel('Actual category').selectOption('');
+  await page.getByLabel('#work').check();
+  await page.getByRole('button', { name: 'Save defaults', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: 'Example Cafe · No category · #work', exact: true }),
+  ).toBeVisible();
+  const cafe = store.payees.list('cafe central', 0, 1)[0]!;
+  await page.getByLabel('Link to').selectOption(cafe.id);
+  await expect(page.locator('#payee-link-preview')).toContainText('Cafe Central');
+  await page.getByRole('button', { name: 'Link', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: 'Cafe Central · No category · #work', exact: true }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Use as separate payee', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: 'Example Cafe · No category', exact: true }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: /split descriptor.*Migration conflict/ }).click();
+  await expect(page.locator('#payee-state')).toContainText('Another Cafe');
+  await expect(page.locator('#payee-state')).toContainText('Cafe Central');
+  await page.getByLabel('#work').check();
+  await page.getByRole('button', { name: 'Save defaults', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: /split descriptor.*#work.*Migration conflict/ }),
+  ).toBeVisible();
+  await page.getByLabel('Actual category').selectOption({ label: 'Leave uncategorized' });
+  await page.getByRole('button', { name: 'Save defaults', exact: true }).click();
+  await expect(
+    page.getByRole('button', { name: 'split descriptor · No category · #work', exact: true }),
+  ).toBeVisible();
   await page.getByRole('button', { name: 'Configuration', exact: true }).click();
   const accounts = page.getByLabel('Account routing YAML');
   await expect(accounts).toHaveValue(/1234/);
@@ -207,7 +256,7 @@ try {
   await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
   expect(errors).toEqual([]);
   console.log(
-    'Management browser smoke passed: login, safe audit, stale-preview races, confirmation invalidation, YAML conflict/save locking/read-only mode, Tasker export, checkpoint/time zone, mobile layout, logout.',
+    'Management browser smoke passed: login, safe audit, payee defaults and descriptor links, stale-preview races, confirmation invalidation, YAML conflict/save locking/read-only mode, Tasker export, checkpoint/time zone, mobile layout, logout.',
   );
 } finally {
   await browser?.close();

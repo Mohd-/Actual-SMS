@@ -240,10 +240,13 @@ async function main() {
 
     const bankFees = await choose('Choose the bank-fees category:', categories);
     const eligible = await chooseMany(
-      'Choose categories eligible for merchant enrichment:',
+      'Choose categories eligible for payee editor suggestions:',
       categories.filter(category => category.name !== bankFees.name),
     );
-    const openCodeKey = await secret('OpenCode Go API key (blank to disable enrichment)', true);
+    const openCodeKey = await secret(
+      'OpenCode Go API key (blank to disable category suggestions)',
+      true,
+    );
     const apiKey = randomBytes(32).toString('base64url');
     const config: AppConfigFile = {
       accounts: mappings,

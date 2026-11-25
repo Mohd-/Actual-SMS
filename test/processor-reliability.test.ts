@@ -28,7 +28,7 @@ const purchase = 'Purchase Card **1234 Amount SAR 25 at Example Store on 2026-08
 const transfer =
   'Outgoing transfer From: 1234 To: 5678 Amount SAR 100 Fees SAR 1 on 2026-08-22 10:05';
 const credit = 'Incoming transfer From: 1234 To: 5678 Amount SAR 100 on 2026-08-22 10:05';
-const disabled = { enrich: async () => ({ status: 'disabled' as const, durationMs: 0 }) };
+
 function setup() {
   const store = new EventStore(':memory:');
   stores.push(store);
@@ -40,7 +40,10 @@ function setup() {
     sync: vi.fn(async () => {}),
     accounts: async () => [],
     categories: async () => [],
+    payees: async () => [],
+    tags: async () => [],
     transactions: async () => [],
+    importedTransactionPayee: async () => undefined,
     transferPayee: async account => `transfer:${account}`,
     importTransactions: vi.fn(async (account, transactions) => {
       const added: string[] = [],
@@ -53,7 +56,7 @@ function setup() {
       return { added, updated, errors: [] };
     }),
   };
-  return { store, actual, ledger, processor: new Processor(store, actual, disabled, config) };
+  return { store, actual, ledger, processor: new Processor(store, actual, config) };
 }
 const enqueue = (store: EventStore, id: string, message = purchase, sender = 'SAB') =>
   store.enqueue({ eventId: id, sender, message, receivedAt }).id;
@@ -142,7 +145,7 @@ describe('accounting reliability', () => {
     enqueue(store, 'debit', transfer);
     await processor.tick();
     due(store, 'debit');
-    const restarted = new Processor(store, actual, disabled, config);
+    const restarted = new Processor(store, actual, config);
     await restarted.tick();
     expect(store.get('debit')?.status).toBe('imported');
     expect(ledger.size).toBe(2);
@@ -159,7 +162,7 @@ describe('accounting reliability', () => {
     expect(ledger.size).toBe(2);
     const ids = [...ledger.keys()];
     due(store, 'two');
-    await new Processor(store, actual, disabled, config).tick();
+    await new Processor(store, actual, config).tick();
     expect([...ledger.keys()]).toEqual(ids);
     const result = parseSms(purchase, receivedAt, banks, 'SAB', parsing);
     if (result.type !== 'transaction') throw new Error('Invalid synthetic fixture');
@@ -180,7 +183,7 @@ describe('accounting reliability', () => {
       store.db.prepare('UPDATE events SET import_identity_revision=0 WHERE id=?').run('old');
       migrateImportIdentities(store, config);
       expect(store.reserveImportId('old', 'main', legacy)).toBe(legacy);
-      const restarted = new Processor(store, actual, disabled, config);
+      const restarted = new Processor(store, actual, config);
       enqueue(store, 'new');
       await restarted.tick();
       const latest = [...ledger.values()].at(-1)?.transaction.imported_id;

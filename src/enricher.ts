@@ -4,7 +4,6 @@ import type { Enricher, EnrichmentResult } from './types.js';
 export const OPENCODE_GO_CHAT_COMPLETIONS_URL = 'https://opencode.ai/zen/go/v1/chat/completions';
 
 const resultSchema = z.object({
-  payee: z.string().min(1).max(100),
   categoryId: z.string().min(1),
   confidence: z.number().min(0).max(1),
   reason: z.string().min(1).max(160),
@@ -41,14 +40,12 @@ export class OpenCodeGoEnricher implements Enricher {
             {
               role: 'system',
               content:
-                'Normalize the merchant and select exactly one category ID from the supplied categories. Use location and transaction time only to disambiguate. Return only JSON with payee, categoryId, confidence, and reason.',
+                'Select the most likely category ID for this payee from the supplied categories. Return only JSON with categoryId, confidence, and reason.',
             },
             {
               role: 'user',
               content: JSON.stringify({
-                merchant: input.merchant,
-                location: input.location,
-                occurredAt: input.occurredAt,
+                payee: input.payee,
                 categories: input.categories,
               }),
             },
@@ -131,8 +128,40 @@ export class OpenCodeGoEnricher implements Enricher {
     }
   }
 }
-export class NoopEnricher implements Enricher {
-  async enrich(): Promise<EnrichmentResult> {
-    return { status: 'disabled', durationMs: 0 };
+export class PayeeSuggestions {
+  private readonly recent = new Map<
+    string,
+    { expires: number; promise: Promise<import('./types.js').AiSuggestion | null> }
+  >();
+
+  constructor(
+    private readonly provider: Enricher,
+    private readonly minConfidence: number,
+  ) {}
+
+  suggest(payee: string, categories: Parameters<Enricher['enrich']>[0]['categories']) {
+    if (!categories.length) return Promise.resolve(null);
+    const key = JSON.stringify([payee, categories]);
+    const existing = this.recent.get(key);
+    const now = Date.now();
+    if (existing && existing.expires > now) return existing.promise;
+    for (const [id, entry] of this.recent) if (entry.expires <= now) this.recent.delete(id);
+    if (this.recent.size >= 128) return Promise.resolve(null);
+    const promise = this.provider
+      .enrich({ payee, categories })
+      .then(result =>
+        result.status === 'success' &&
+        result.suggestion.confidence >= this.minConfidence &&
+        categories.some(category => category.id === result.suggestion.categoryId)
+          ? result.suggestion
+          : null,
+      )
+      .catch(() => null)
+      .then(suggestion => {
+        if (!suggestion && this.recent.get(key)?.promise === promise) this.recent.delete(key);
+        return suggestion;
+      });
+    this.recent.set(key, { expires: now + 5 * 60_000, promise });
+    return promise;
   }
 }

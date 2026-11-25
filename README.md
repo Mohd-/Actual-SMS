@@ -4,7 +4,7 @@ Turn bank SMS notifications into transactions in Actual Budget.
 
 Tasker checks your Android phone's inbox and sends new messages to this self-hosted service. The service saves supported bank messages to a queue, reads the transaction details, and imports them into your budget through Actual's official API. If your phone goes offline, Tasker picks up where it left off on the next sync.
 
-The included configuration supports SAB, Al Rajhi, Wadaie, and D360. STC Bank messages are saved for review without creating transactions. You can add banks and adjust SMS recognition in YAML. You can also enable OpenCode Go to clean up merchant names and suggest categories.
+The included configuration supports SAB, Al Rajhi, Wadaie, and D360. STC Bank messages are saved for review without creating transactions. You can add banks and adjust SMS recognition in YAML. You can also enable OpenCode Go to suggest categories in the payee editor.
 
 ## Get started
 
@@ -109,7 +109,7 @@ Restart the service after changing configuration. Keep `.env` and `config/accoun
 
 If you'd rather edit the files yourself, copy `.env.example` to `.env` and `config/accounts.example.yaml` to `config/accounts.yaml`. Replace all example names and suffixes with your own, and remove unused account entries. Account and category names must exactly match existing, open entries in Actual.
 
-Leave `OPENCODE_GO_API_KEY` empty to turn off AI suggestions. `MAPPING_REFRESH_MINUTES` controls how often the service learns category changes you've made in Actual; the default is 60 minutes.
+Leave `OPENCODE_GO_API_KEY` empty to turn off category suggestions in the payee editor. `MAPPING_REFRESH_MINUTES` controls how often the service refreshes the Actual payee, category, and tag catalog. The default is 60 minutes.
 
 You can also run the wizard with `npm run setup:host` if you've successfully installed the host dependencies, including Actual's native SQLite module.
 
@@ -241,7 +241,7 @@ Use `GET /v1/events` to see what's been received and `GET /v1/events/:id` to ins
 
 OTP, login, declined, and insufficient-funds notifications are intentionally ignored. Unrecognized or malformed messages from registered banks, along with messages from review-only banks, are saved as `needs_review`. They don't retry within the same parser revision.
 
-The event list has cursor pagination and optional `status`, `enrichmentStatus`, `from`, and `to` filters. Event details include the original input, status history, enrichment attempts, the source of merchant/category mappings, `parserReason`, and operational `error` values. Raw SMS and location are available only in the authenticated detail response.
+The event list has cursor pagination and optional `status`, `enrichmentStatus`, `from`, and `to` filters. Event details include the original input, status history, enrichment attempts, submitted payee defaults and legacy enrichment outcomes, `parserReason`, and operational `error` values. Raw SMS and location are available only in the authenticated detail response.
 
 Processing retries wait 1 minute, 5 minutes, 30 minutes, and 2 hours. Events remain available to inspect after a terminal error.
 
@@ -273,17 +273,15 @@ Valid rows are acknowledged as `empty`, `unsupported`, `duplicate`, or `queued`.
 
 The Tasker SQL query uses `|~sms~|` as its column divider. The server also accepts unsplit comma-separated rows from older imports that lost their tab divider, preserving commas and newlines within message bodies.
 
-## Merchant names, categories, and privacy
+## Payees, categories, tags, and privacy
 
-The service matches normalized merchant text and the Actual account. Existing assignments learned from categorized Actual transactions and earlier enrichments continue to apply. History refreshes at startup and every hour by default. An active approved assignment reuses its payee and category without an AI request.
+Open **Payees** in the management console to see payees from Actual and merchants from SMS imports. Link alternate SMS descriptors to a payee so imports across accounts can share its optional category and tags. Choose from existing Actual categories and tags. Saving changes future SMS import plans, and Actual's native rules still take priority during import.
 
-For a new merchant, OpenCode Go can propose a payee and a category from the eligible categories. The service sends the merchant text, optional location and transaction time, and eligible category names and IDs. The default model is `deepseek-v4-flash`; set `OPENCODE_GO_MODEL` to select another. Provider errors leave the transaction eligible for ordinary import.
-
-AI suggestions are saved in SQLite for review. While a suggestion is pending, transactions import with the parsed payee and no category. In the management console, open **Merchant assignments** to approve or edit suggestions and to create, edit, or delete assignments. Approved assignments apply to future imports. Deleting an assignment suppresses automatic learning for that merchant and account until you create a replacement.
+Opening an uncategorized payee in the editor can request an OpenCode Go suggestion. The request contains the payee name and eligible category names and IDs. **Use suggestion** fills the category field. **Save defaults** applies the choice. The default model is `deepseek-v4-flash`. Set `OPENCODE_GO_MODEL` to change it.
 
 ### What stays on your server
 
-The SQLite database keeps raw SMS, any supplied location, status changes, mapping decisions, enrichment attempts, and import outcomes indefinitely for authenticated review. Queue data and Actual's local cache live in separate persistent Docker volumes. This service doesn't encrypt those volumes, so protect access to the host and Docker.
+The SQLite database keeps raw SMS, any supplied location, status changes, payee defaults, enrichment audit history, and import outcomes indefinitely for authenticated review. Queue data and Actual's local cache live in separate persistent Docker volumes. This service doesn't encrypt those volumes, so protect access to the host and Docker.
 
 ### What gets imported
 
@@ -340,7 +338,7 @@ To include the OpenCode Go smoke test in the test run, set `LIVE_OPENCODE_GO_TES
 
 ### Upgrading Actual
 
-Dependency installation checks and applies the pending-assignment reconciliation adjustment to the pinned SDK. If the reconciliation code changes, review the adjustment in `scripts/patch-actual-sdk.mjs` and rerun the disposable smoke test with an Actual rule that would otherwise rename and categorize a pending transaction.
+Dependency installation applies the reconciliation compatibility adjustment for frozen imports from the former merchant-approval workflow. If the pinned SDK changes, review `scripts/patch-actual-sdk.mjs` and rerun the disposable smoke test.
 
 The `@actual-app/api` dependency is pinned to **26.11.0** to match the deployed Actual server. Startup reads the installed API version and checks server metadata before opening the budget. Mismatches and discovery failures block imports. Authentication, download, and migration failures also prevent startup.
 
@@ -362,7 +360,7 @@ MIT. See [LICENSE](LICENSE).
 `npm run smoke:disposable` creates a new empty budget on the configured Actual
 server, creates synthetic accounts and categories, runs the original smoke test
 from a separate client cache, and exercises the SMS processor against the real API.
-It verifies merchant classification, Riyadh dates, equal-purchase identities,
+It verifies payee defaults, tags, Actual rules, Riyadh dates, equal-purchase identities,
 linked transfers, fees, and retry idempotency before deleting the disposable budget.
 It never downloads or opens an existing budget. Remote cleanup is independently
 verified because Actual's low-level deletion handler can suppress server errors.

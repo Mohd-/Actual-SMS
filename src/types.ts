@@ -79,6 +79,7 @@ export interface ResolvedConfig {
   bankFeesCategoryId: string;
   eligibleCategories: { id: string; name: string }[];
   expenseCategories?: { id: string; name: string }[];
+  aiCategoryNames?: string[];
 }
 export interface ResolvedAccount {
   key: string;
@@ -128,11 +129,21 @@ export interface ActualCategory {
   isIncome?: boolean;
   hidden?: boolean;
 }
+export interface ActualPayee {
+  id: string;
+  name: string;
+  transferAccountId?: string;
+}
+export interface ActualTag {
+  id: string;
+  name: string;
+  hidden?: boolean;
+}
 export interface HistoricalTransaction {
   id: string;
   accountId: string;
   date: string;
-  payeeName?: string;
+  payeeId?: string;
   importedPayee?: string;
   categoryId?: string;
   importedId?: string;
@@ -150,25 +161,29 @@ export interface ActualAdapter {
   sync(): Promise<void>;
   accounts(): Promise<{ id: string; name: string }[]>;
   categories(): Promise<ActualCategory[]>;
+  payees(): Promise<ActualPayee[]>;
+  tags(): Promise<ActualTag[]>;
   transactions(
     accountId: string,
     startDate: string,
     endDate: string,
   ): Promise<HistoricalTransaction[]>;
+  importedTransactionPayee(
+    accountId: string,
+    transactionId: string,
+    importedId: string,
+  ): Promise<string | undefined>;
   transferPayee(accountId: string): Promise<string>;
   importTransactions(accountId: string, transactions: ActualTransaction[]): Promise<ImportResult>;
 }
 export interface AiSuggestion {
-  payee: string;
   categoryId: string;
   confidence: number;
   reason: string;
 }
 export interface Enricher {
   enrich(input: {
-    merchant: string;
-    location?: Location;
-    occurredAt: string;
+    payee: string;
     categories: { id: string; name: string }[];
   }): Promise<EnrichmentResult>;
 }

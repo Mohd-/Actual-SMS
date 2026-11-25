@@ -1,5 +1,5 @@
-import type { MerchantAssignment } from '../merchant-assignments.js';
-import type { AssignmentPage, ConfigView, EventPage, EventView, StatusView } from './contracts.js';
+import type { PayeeView } from '../payees.js';
+import type { ConfigView, EventPage, EventView, PayeePage, StatusView } from './contracts.js';
 import type { InboxCheckpoint } from '../types.js';
 
 const element = <T extends HTMLElement = HTMLElement>(id: string) =>
@@ -150,165 +150,290 @@ async function events(cursor?: string) {
   nextCursor = page.nextCursor;
   element<HTMLButtonElement>('next').disabled = !nextCursor;
 }
-let assignmentPage: AssignmentPage | undefined;
-let selectedAssignment: MerchantAssignment | undefined;
-let merchantOffset = 0;
-let merchantGeneration = 0;
-let merchantSearch = '';
+let payeePage: PayeePage | undefined;
+let selectedPayee: PayeeView | undefined;
+let payeeOffset = 0;
+let payeeGeneration = 0;
+let editorGeneration = 0;
+let payeeSearch = '';
+let targets: PayeeView[] = [];
 
-function assignmentOptions(id: string, choices: { id: string; name: string }[], value?: string) {
-  const select = element<HTMLSelectElement>(id);
-  select.replaceChildren(new Option('Select…', ''));
-  for (const choice of choices) select.add(new Option(choice.name, choice.id));
-  select.value = value ?? '';
-  if (select.selectedIndex < 0) select.value = '';
+function categoryName(id: string, page: PayeePage) {
+  const category = page.categories.find(item => item.id === id);
+  if (!category) return `Unavailable category (${id})`;
+  const ambiguous = page.categories.some(item => item.id !== id && item.name === category.name);
+  return ambiguous && category.groupName
+    ? `${category.groupName} / ${category.name}`
+    : category.name;
 }
 
-function editAssignment(assignment?: MerchantAssignment) {
-  if (!assignmentPage) return;
-  selectedAssignment = assignment;
-  assignmentOptions('merchant-account', assignmentPage.accounts, assignment?.accountId);
-  assignmentOptions('merchant-category', assignmentPage.categories, assignment?.categoryId);
-  const account = element<HTMLSelectElement>('merchant-account');
-  if (assignment && !account.value)
-    account.add(new Option(assignment.accountId, assignment.accountId));
-  if (assignment) account.value = assignment.accountId;
-  account.disabled = Boolean(assignment);
-  const merchant = element<HTMLInputElement>('merchant-name');
-  merchant.value = assignment?.merchant ?? '';
-  merchant.readOnly = Boolean(assignment);
-  element<HTMLInputElement>('merchant-payee').value = assignment?.payee ?? '';
-  text('merchant-form-title', assignment ? 'Edit assignment' : 'Create assignment');
+function payeeSettings(row: PayeeView, page: PayeePage) {
+  const category = row.categoryId ? categoryName(row.categoryId, page) : 'No category';
+  const tags = row.tagIds.map(id => {
+    const tag = page.tags.find(tag => tag.id === id);
+    return tag ? `#${tag.name}` : 'Unavailable tag';
+  });
+  return [category, ...tags, ...(row.conflict.length ? ['Migration conflict'] : [])].join(' · ');
+}
+
+async function editPayee(row: PayeeView, page: PayeePage) {
+  const generation = ++editorGeneration;
+  selectedPayee = row;
+  element('payee-editor').hidden = false;
+  text('payee-name', row.name);
+  const conflicts = row.conflict.map(choice => {
+    const account =
+      page.accounts.find(account => account.id === choice.accountId)?.name ?? choice.accountId;
+    return `${account} (${choice.merchant}${choice.payee ? ` → ${choice.payee}` : ''}): ${choice.categoryId ? categoryName(choice.categoryId, page) : 'Removed'}`;
+  });
   text(
-    'merchant-source',
-    assignment
-      ? [
-          {
-            actual: 'Actual history',
-            local: 'Previous AI assignment',
-            ai: 'AI suggestion',
-            manual: 'Manual assignment',
-          }[assignment.source],
-          assignment.confidence === null
-            ? ''
-            : `Confidence: ${Math.round(assignment.confidence * 100)}%`,
-          assignment.reason,
-        ]
-          .filter(Boolean)
-          .join(' · ')
+    'payee-state',
+    [
+      !page.editable ? 'Connect to Actual to edit defaults.' : '',
+      row.unavailable
+        ? 'This Actual payee is unavailable. Link it to another payee to move its defaults.'
+        : '',
+      conflicts.length
+        ? `Previous settings differ. Choose a category or leave the payee uncategorized to resolve them. ${conflicts.join(' · ')}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' '),
+  );
+  const category = element<HTMLSelectElement>('payee-category');
+  category.replaceChildren(
+    new Option(conflicts.length ? 'Keep category unresolved' : 'No category', ''),
+    ...(conflicts.length ? [new Option('Leave uncategorized', '*')] : []),
+    ...page.categories.map(item => new Option(categoryName(item.id, page), item.id)),
+  );
+  if (row.categoryId && !page.categories.some(item => item.id === row.categoryId))
+    category.add(new Option(categoryName(row.categoryId, page), row.categoryId));
+  category.value = row.categoryId ?? '';
+  const tagLabels = [
+    ...page.tags.map(tag => ({ id: tag.id, name: `#${tag.name}` })),
+    ...row.tagIds
+      .filter(id => !page.tags.some(tag => tag.id === id))
+      .map(id => ({ id, name: `Unavailable tag (${id})` })),
+  ];
+  const tags = element('payee-tags');
+  tags.replaceChildren();
+  for (const tag of tagLabels) {
+    const label = document.createElement('label');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = tag.id;
+    checkbox.checked = row.tagIds.includes(tag.id);
+    label.append(checkbox, ` ${tag.name}`);
+    tags.append(label);
+  }
+  if (!tagLabels.length) tags.textContent = 'No tags available in Actual.';
+  element<HTMLFieldSetElement>('payee-controls').disabled = !page.editable;
+
+  const aliases = element<HTMLSelectElement>('payee-alias');
+  aliases.replaceChildren(...row.aliases.map(alias => new Option(alias.name, alias.key)));
+  if (row.unavailable) aliases.add(new Option('Move this payee and all descriptors', '*'), 0);
+  if (row.unavailable) aliases.selectedIndex = 0;
+  aliases.disabled = !page.editable || aliases.options.length === 0;
+  const targetForm = element<HTMLFormElement>('payee-target-filter');
+  for (const field of targetForm.querySelectorAll<HTMLInputElement | HTMLButtonElement>(
+    'input, button',
+  ))
+    field.disabled = aliases.disabled;
+  element<HTMLInputElement>('payee-target-search').value = '';
+  setPayeeTargets(page.rows.filter(target => target.id !== row.id && !target.unavailable));
+
+  const suggestionStatus = element('payee-suggestion');
+  const button = element<HTMLButtonElement>('payee-use-suggestion');
+  button.hidden = true;
+  button.onclick = null;
+  suggestionStatus.hidden =
+    !!row.categoryId || row.unavailable || !page.suggestions || !page.editable;
+  category.onchange = () => {
+    button.hidden = true;
+    suggestionStatus.hidden = true;
+  };
+  if (suggestionStatus.hidden) return;
+  suggestionStatus.textContent = 'Looking for a category suggestion…';
+  try {
+    const result = await request<{ suggestion: { categoryId: string; reason: string } | null }>(
+      'payees/suggestion',
+      { id: row.id, revision: row.revision },
+    );
+    if (generation !== editorGeneration || suggestionStatus.hidden) return;
+    const suggestion = result.suggestion;
+    if (!suggestion || !page.categories.some(item => item.id === suggestion.categoryId)) {
+      suggestionStatus.textContent = 'No suggestion available.';
+      return;
+    }
+    suggestionStatus.textContent = `${categoryName(suggestion.categoryId, page)} · ${suggestion.reason}`;
+    button.hidden = false;
+    button.onclick = () => {
+      category.value = suggestion.categoryId;
+      button.hidden = true;
+    };
+  } catch {
+    if (generation === editorGeneration && !suggestionStatus.hidden)
+      suggestionStatus.textContent = 'No suggestion available.';
+  }
+}
+
+function setPayeeTargets(rows: PayeeView[]) {
+  targets = rows;
+  const field = element<HTMLSelectElement>('payee-target');
+  field.replaceChildren(
+    new Option('Choose a payee', ''),
+    ...rows.map(row => new Option(row.name, row.id)),
+  );
+  field.disabled = element<HTMLSelectElement>('payee-alias').disabled || rows.length === 0;
+  updatePayeeLink();
+}
+
+function updatePayeeLink() {
+  const source = selectedPayee;
+  const alias = element<HTMLSelectElement>('payee-alias');
+  const target = targets.find(row => row.id === element<HTMLSelectElement>('payee-target').value);
+  element<HTMLButtonElement>('payee-unlink').disabled =
+    alias.disabled || !source?.aliases.some(item => item.key === alias.value && item.linked);
+  element<HTMLButtonElement>('payee-link').disabled = alias.disabled || !alias.value || !target;
+  const page = payeePage;
+  text(
+    'payee-link-preview',
+    source && target && page
+      ? `${alias.selectedOptions[0]?.textContent} → ${target.name} (${payeeSettings(target, page)}). ` +
+          (alias.value === '*' || (!source.actualId && source.aliases.length === 1)
+            ? 'Saved defaults move with the descriptor when the settings agree or the destination has room for them.'
+            : 'The destination payee’s defaults apply to this descriptor.')
       : '',
   );
-  text(
-    'merchant-save',
-    assignment?.status === 'pending' ? 'Approve assignment' : 'Save assignment',
-  );
-  element('merchant-delete').hidden = !assignment;
-  element('merchant-form').hidden = false;
-  element(assignment ? 'merchant-payee' : 'merchant-account').focus();
 }
 
-async function loadAssignments(offset = 0) {
-  const generation = ++merchantGeneration;
-  const params = new URLSearchParams({ search: merchantSearch, offset: String(offset) });
-  const page = await request<AssignmentPage>(`merchant-assignments?${params}`);
-  if (generation !== merchantGeneration) return;
-  if (offset > 0 && !page.rows.length) return loadAssignments(Math.max(0, offset - 50));
-  assignmentPage = page;
-  selectedAssignment = undefined;
-  merchantOffset = offset;
-  element('merchant-form').hidden = true;
-  const list = element('merchant-list');
+async function loadPayees(offset = 0, reopen?: string) {
+  const generation = ++payeeGeneration;
+  ++editorGeneration;
+  const params = new URLSearchParams({ search: payeeSearch, offset: String(offset) });
+  const page = await request<PayeePage>(`payees?${params}`);
+  if (generation !== payeeGeneration) return;
+  if (offset > 0 && !page.rows.length) return loadPayees(Math.max(0, offset - 50));
+  payeePage = page;
+  selectedPayee = undefined;
+  payeeOffset = offset;
+  element('payee-editor').hidden = true;
+  const list = element('payee-list');
   list.replaceChildren();
   for (const row of page.rows) {
-    const account = page.accounts.find(item => item.id === row.accountId)?.name ?? row.accountId;
-    const category =
-      page.categories.find(item => item.id === row.categoryId)?.name ?? 'Unavailable category';
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = `${row.merchant} · ${account} · ${row.payee} · ${category} · ${row.status === 'pending' ? 'Pending' : 'Approved'}`;
-    button.addEventListener('click', () => editAssignment(row));
     const item = document.createElement('li');
+    const button = document.createElement('button');
+    button.textContent = `${row.name} · ${payeeSettings(row, page)}${row.unavailable ? ' · Unavailable' : ''}`;
+    button.addEventListener('click', () => void editPayee(row, page));
     item.append(button);
     list.append(item);
   }
   text(
-    'merchant-count',
-    page.rows.length
-      ? `Showing ${offset + 1}–${offset + page.rows.length}`
-      : 'No assignments found.',
+    'payee-count',
+    page.migrationPending
+      ? 'Payee migration is waiting for Actual. SMS messages remain queued.'
+      : page.rows.length
+        ? `Payees ${offset + 1}–${offset + page.rows.length}`
+        : 'No payees found.',
   );
-  element<HTMLButtonElement>('merchant-previous').disabled = offset === 0;
-  element<HTMLButtonElement>('merchant-next').disabled = page.nextOffset === null;
+  element<HTMLButtonElement>('payee-previous').disabled = offset === 0;
+  element<HTMLButtonElement>('payee-next').disabled = page.nextOffset === null;
+  const row = page.rows.find(row => row.id === reopen);
+  if (row) void editPayee(row, page);
 }
 
 action(
-  'merchant-filter',
+  'payee-filter',
   async () => {
-    merchantSearch = element<HTMLInputElement>('merchant-search').value;
-    await loadAssignments();
+    payeeSearch = element<HTMLInputElement>('payee-search').value;
+    await loadPayees();
   },
   'submit',
 );
-element('merchant-previous').addEventListener('click', () => {
-  void showAssignmentPage(Math.max(0, merchantOffset - 50));
+action('payee-previous', () => loadPayees(Math.max(0, payeeOffset - 50)));
+action('payee-next', async () => {
+  if (payeePage?.nextOffset != null) await loadPayees(payeePage.nextOffset);
 });
-element('merchant-next').addEventListener('click', () => {
-  if (assignmentPage?.nextOffset != null) void showAssignmentPage(assignmentPage.nextOffset);
-});
-async function showAssignmentPage(offset: number) {
-  errorBox.hidden = true;
-  try {
-    await loadAssignments(offset);
-  } catch (error) {
-    text('error', String(error));
-    errorBox.hidden = false;
-  }
-}
-element('merchant-new').addEventListener('click', () => editAssignment());
 action(
-  'merchant-form',
+  'payee-form',
   async () => {
-    const save = element<HTMLButtonElement>('merchant-save');
-    if (save.disabled) return;
-    save.disabled = true;
+    const row = selectedPayee;
+    if (!row) return;
+    const controls = element<HTMLFieldSetElement>('payee-controls');
+    if (controls.disabled) return;
+    const generation = editorGeneration;
+    const selectedCategory = element<HTMLSelectElement>('payee-category').value;
+    const resolveCategoryConflict = selectedCategory === '*';
+    const categoryId = selectedCategory && !resolveCategoryConflict ? selectedCategory : null;
+    const tagIds = Array.from(
+      element('payee-tags').querySelectorAll<HTMLInputElement>('input:checked'),
+      item => item.value,
+    );
+    controls.disabled = true;
     try {
-      await request('merchant-assignments/save', {
-        accountId: element<HTMLSelectElement>('merchant-account').value,
-        merchant: element<HTMLInputElement>('merchant-name').value,
-        payee: element<HTMLInputElement>('merchant-payee').value,
-        categoryId: element<HTMLSelectElement>('merchant-category').value,
-        expected: selectedAssignment?.revision ?? null,
+      await request('payees/save', {
+        id: row.id,
+        revision: row.revision,
+        categoryId,
+        tagIds,
+        resolveCategoryConflict,
       });
-      await loadAssignments(merchantOffset);
     } finally {
-      save.disabled = false;
+      if (generation === editorGeneration) controls.disabled = false;
     }
+    if (generation === editorGeneration) await loadPayees(payeeOffset, row.id);
   },
   'submit',
 );
-action('merchant-delete', async () => {
-  const assignment = selectedAssignment;
-  if (
-    !assignment ||
-    !confirm(
-      'Remove this assignment and stop automatic learning for this merchant on this account?',
-    )
-  )
-    return;
-  await request('merchant-assignments/delete', {
-    accountId: assignment.accountId,
-    merchant: assignment.merchant,
-    expected: assignment.revision,
+element('payee-alias').addEventListener('change', updatePayeeLink);
+element('payee-target').addEventListener('change', updatePayeeLink);
+action(
+  'payee-target-filter',
+  async () => {
+    const generation = editorGeneration;
+    const search = element<HTMLInputElement>('payee-target-search').value;
+    const page = await request<PayeePage>(`payees?${new URLSearchParams({ search })}`);
+    if (generation !== editorGeneration) return;
+    setPayeeTargets(page.rows.filter(row => row.id !== selectedPayee?.id && !row.unavailable));
+    if (!targets.length) text('payee-link-preview', 'No available payees match that search.');
+    else if (page.nextOffset !== null)
+      text('payee-link-preview', 'Refine the search to see additional matches.');
+  },
+  'submit',
+);
+action('payee-link', async () => {
+  const source = selectedPayee;
+  const key = element<HTMLSelectElement>('payee-alias').value;
+  const target = targets.find(row => row.id === element<HTMLSelectElement>('payee-target').value);
+  if (!source || !key || !target) return;
+  await request('payees/link', {
+    key: key === '*' ? null : key,
+    id: source.id,
+    revision: source.revision,
+    targetId: target.id,
+    targetRevision: target.revision,
   });
-  await loadAssignments(merchantOffset);
+  await loadPayees(payeeOffset, target.id);
+});
+action('payee-unlink', async () => {
+  const source = selectedPayee;
+  const key = element<HTMLSelectElement>('payee-alias').value;
+  if (!source || !key || key === '*') return;
+  if (!window.confirm('Use this SMS descriptor as a separate payee with blank defaults?')) return;
+  await request('payees/unlink', { key, id: source.id, revision: source.revision });
+  await loadPayees(payeeOffset, source.id);
 });
 
 async function show(page: string) {
-  for (const id of ['status', 'inbox', 'merchants', 'config', 'tasker'])
+  for (const id of ['status', 'inbox', 'payees', 'config', 'tasker'])
     element(id).hidden = id !== page;
+  if (page !== 'payees') {
+    ++payeeGeneration;
+    ++editorGeneration;
+  }
   if (page === 'status') await status();
   if (page === 'inbox') await events();
-  if (page === 'merchants') await loadAssignments();
+  if (page === 'payees') await loadPayees();
   if (page === 'config') await loadConfig();
   if (page === 'tasker') await loadCheckpoint();
 }

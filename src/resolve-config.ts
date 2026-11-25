@@ -40,6 +40,7 @@ export function resolveConfig(
     }),
     bankFeesCategoryId: fee.id,
     expenseCategories: active.map(({ id, name }) => ({ id, name })),
+    aiCategoryNames: file.eligibleCategories?.length ? file.eligibleCategories : undefined,
     eligibleCategories: eligible.map(({ id, name }) => ({ id, name })),
   };
 }

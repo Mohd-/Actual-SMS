@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { EventStore } from '../src/db.js';
 import { PARSER_REVISION } from '../src/parser.js';
 import { Processor } from '../src/processor.js';
-import type { ActualAdapter, Enricher, ResolvedConfig } from '../src/types.js';
+import type { ActualAdapter, ResolvedConfig } from '../src/types.js';
 
 const stores: EventStore[] = [];
 afterEach(() => {
@@ -74,7 +74,10 @@ function setup() {
     sync: async () => {},
     accounts: async () => [],
     categories: async () => [],
+    payees: async () => [],
+    tags: async () => [],
     transactions: async () => [],
+    importedTransactionPayee: async () => undefined,
     transferPayee: async accountId => {
       transferPayees.push(accountId);
       return `transfer:${accountId}`;
@@ -84,13 +87,13 @@ function setup() {
       return { added: ['actual-id'], updated: [], errors: [] };
     },
   };
-  const ai: Enricher = { enrich: async () => ({ status: 'disabled', durationMs: 0 }) };
+
   return {
     store,
     imported,
     transferPayees,
     actual,
-    processor: new Processor(store, actual, ai, config),
+    processor: new Processor(store, actual, config),
   };
 }
 

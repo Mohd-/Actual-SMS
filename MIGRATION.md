@@ -161,3 +161,11 @@ and GitHub checks use Node 22. Older API clients must not be assumed compatible
 with newer server migrations. Preserve recovery images privately and prefer a
 client matching the server when recovering; reconcile remote writes before
 restoring local state. The Docker build runs the complete repository check.
+
+## Upgrade from Merchant assignments to Payees
+
+Rehearse the upgrade on a copy of the queue and take a consistent SQLite backup before switching the importer. Pause incoming SMS and management writes at the ingress and let the maintenance operation drain the worker. After stopping the old importer, clear its maintenance marker through the coordinated deployment workflow and start the new version against the same queue while intake is held. The importer needs one successful Actual catalog sync to migrate. A failed migration leaves the original tables intact and holds queued imports for retry after reconnect.
+
+The migration carries explicit approvals and saved settings into global payee defaults. Passive history and pending AI suggestions contribute known descriptors. When explicit decisions disagree, the editor shows the prior payee and category choices on the affected row and leaves its category blank until explicitly resolved. The migration removes the old assignment tables after conversion and preserves existing events, audit entries, inbox checkpoints, and import plans.
+
+Verify readiness and the payee list, and compare the event and import identity records before reopening intake. To roll back while writes are still held, stop the new importer and restore the paired old image and pre-upgrade SQLite backup. After reopening intake, keep the migrated database so subsequently accepted events and checkpoints survive.

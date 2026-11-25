@@ -2,11 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { loadActualApi } from '../src/actual-sdk.js';
+import type { ActualSession, loadActualApi } from '../src/actual-sdk.js';
 import { ACTUAL_API_VERSION } from '../src/actual-version.js';
 
 type Api = Awaited<ReturnType<typeof loadActualApi>>;
-export type BudgetControl = Pick<Awaited<ReturnType<Api['init']>>, 'send'>;
+export type BudgetControl = ActualSession;
 export type LifecycleApi = {
   init(options: Parameters<Api['init']>[0]): Promise<BudgetControl>;
   shutdown: Api['shutdown'];
@@ -16,6 +16,7 @@ export interface DisposableContext {
   localId: string;
   syncId: string;
   cacheDir: string;
+  control: BudgetControl;
 }
 export async function withDisposableBudget(
   api: LifecycleApi,
@@ -78,7 +79,7 @@ export async function withDisposableBudget(
       file => file.fileId === budget.cloudFileId && file.name === name,
     );
     if (!remote) throw new Error('Uploaded disposable budget was not found on the server');
-    await run({ name, localId: budget.id, syncId: budget.groupId, cacheDir });
+    await run({ name, localId: budget.id, syncId: budget.groupId, cacheDir, control });
   } catch (error) {
     failures.push(error);
   }

@@ -93,7 +93,10 @@ describe('YAML bank registry', () => {
       serverVersion: async () => '26.11.0',
       accounts: async () => [],
       categories: async () => [],
+      payees: async () => [],
+      tags: async () => [],
       transactions: async () => [],
+      importedTransactionPayee: async () => undefined,
       transferPayee: async () => '',
       importTransactions,
     };
@@ -101,9 +104,7 @@ describe('YAML bank registry', () => {
     const processor = new Processor(
       store,
       actual,
-      {
-        enrich: async () => ({ status: 'disabled', durationMs: 0 }),
-      },
+
       config,
     );
     const app = buildServer({

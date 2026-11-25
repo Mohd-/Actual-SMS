@@ -4,6 +4,7 @@ import { runtimeFixture } from './fixtures/runtime.js';
 import { ConfigEditor } from '../src/config-editor.js';
 import { EventStore } from '../src/db.js';
 import { ManagementCredentials } from '../src/management/credentials.js';
+import { PayeeSuggestions } from '../src/enricher.js';
 import { buildServer } from '../src/server.js';
 import type { Processor } from '../src/processor.js';
 
@@ -15,7 +16,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
   for (const close of cleanup.splice(0)) await close();
 });
-export async function managementFixture() {
+export async function managementFixture(suggestions?: PayeeSuggestions) {
   const f = await runtimeFixture();
   cleanup.push(f.cleanup);
   const store = new EventStore(':memory:');
@@ -28,6 +29,7 @@ export async function managementFixture() {
     ready: () => f.runtime.status().ready,
     management: {
       runtime: f.runtime,
+      suggestions,
       editor: new ConfigEditor(f.runtime, true),
       credentials,
       origin: 'http://localhost:3000',
@@ -49,61 +51,113 @@ export async function managementFixture() {
   return { ...f, store, credentials, app, login };
 }
 describe('optional management authorization', () => {
-  it('lists, approves, edits, deletes and creates merchant assignments with revision checks', async () => {
-    const { app, store, login } = await managementFixture();
-    const base = '/management/merchant-assignments';
+  it('lists all payees, protects edits, and saves and clears independent defaults', async () => {
+    const { app, store, login, runtime } = await managementFixture();
+    const base = '/management/payees';
+    store.payees.refresh({
+      payees: [
+        { id: 'coffee', name: 'Coffee Co' },
+        { id: 'unused', name: 'Never imported' },
+      ],
+      categories: [{ id: 'food', name: 'Food' }],
+      tags: [{ id: 'work', name: 'work' }],
+    });
     expect((await app.inject({ url: base })).statusCode).toBe(401);
     const headers = { origin, cookie: sessionCookie(await login()) };
-    const request = (path: string, payload: Record<string, unknown>) =>
-      app.inject({ method: 'POST', url: `${base}/${path}`, headers, payload });
-    const proposal = store.merchantAssignments.suggest(
-      'checking',
-      'coffee',
-      { payee: 'Coffee Co', categoryId: 'fees', confidence: 0.8, reason: 'test' },
-      'event-1',
-    );
-    const page = await app.inject({ url: `${base}?search=COFFEE`, headers });
-    expect(page.json()).toMatchObject({ rows: [proposal], accounts: [{ id: 'checking' }] });
-    const key = { accountId: 'checking', merchant: 'Coffee', expected: proposal.revision };
-    const edited = { ...key, payee: 'Coffee Company', categoryId: 'fees' };
-    expect((await request('save', { ...edited, categoryId: 'missing' })).statusCode).toBe(400);
-    expect((await request('save', edited)).statusCode).toBe(200);
-    expect((await request('delete', key)).statusCode).toBe(409);
-    const updated = store.merchantAssignments.get('checking', 'coffee')!;
-    expect(updated).toMatchObject({
-      status: 'approved',
-      source: 'manual',
-      payee: 'Coffee Company',
+    const post = (path: string, payload: Record<string, unknown>, requestHeaders = headers) =>
+      app.inject({ method: 'POST', url: `${base}/${path}`, headers: requestHeaders, payload });
+    const page = await app.inject({ url: base, headers });
+    expect(page.json()).toMatchObject({
+      rows: [{ name: 'Coffee Co' }, { name: 'Never imported' }],
     });
-    expect((await request('delete', { ...key, expected: updated.revision })).statusCode).toBe(200);
-    expect((await app.inject({ url: base, headers })).json()).toMatchObject({ rows: [] });
+    const { id, revision } = store.payees.list('coffee', 0, 1)[0]!;
+    const input = { id, revision, categoryId: null, tagIds: ['work'] };
     expect(
-      (await request('save', { ...edited, expected: null, merchant: 'New cafe' })).statusCode,
+      (await post('save', input, { ...headers, origin: 'http://wrong.test' })).statusCode,
+    ).toBe(403);
+    expect((await post('save', { ...input, tagIds: ['unknown'] })).statusCode).toBe(409);
+    expect((await post('save', input)).statusCode).toBe(200);
+    expect((await post('save', input)).statusCode).toBe(409);
+    const tagsOnly = store.payees.get(id)!;
+    expect(tagsOnly).toMatchObject({ categoryId: null, tagIds: ['work'] });
+    expect(
+      (
+        await post('save', {
+          ...input,
+          revision: tagsOnly.revision,
+          categoryId: 'food',
+          tagIds: [],
+        })
+      ).statusCode,
     ).toBe(200);
-    expect(store.merchantAssignments.get('checking', 'new cafe')?.status).toBe('approved');
+    runtime.hold('test outage');
+    expect((await post('save', input)).statusCode).toBe(503);
+    expect((await app.inject({ url: base, headers })).json()).toMatchObject({
+      editable: false,
+      rows: [{ categoryId: 'food', tagIds: [] }, { name: 'Never imported' }],
+    });
   });
 
   it.each(['Coffee-Co', 'CAFÉ', 'Acme   Store', 'متجر-الرياض'])(
-    'finds an assigned payee by normalized search text (%s)',
-    async payee => {
+    'finds known payees and their aliases by normalized search text (%s)',
+    async name => {
       const { app, store, login } = await managementFixture();
-      store.merchantAssignments.save(
-        {
-          accountId: 'checking',
-          merchant: 'original description',
-          payee,
-          categoryId: 'fees',
-        },
-        null,
+      store.payees.refresh({ payees: [{ id: 'canonical', name }], categories: [], tags: [] });
+      store.payees.defaults('Original descriptor');
+      const source = store.payees.list('original descriptor', 0, 1)[0]!;
+      const target = store.payees.list('', 0, 40).find(row => row.actualId === 'canonical')!;
+      store.payees.link(
+        'original descriptor',
+        source.id,
+        source.revision,
+        target.id,
+        target.revision,
       );
-      const query = new URLSearchParams({ search: payee });
-      const result = await app.inject({
-        url: `/management/merchant-assignments?${query}`,
-        headers: { cookie: sessionCookie(await login()) },
-      });
-      expect(result.json()).toMatchObject({ rows: [{ merchant: 'original description', payee }] });
+      const headers = { cookie: sessionCookie(await login()) };
+      for (const search of [name, 'original descriptor']) {
+        const query = new URLSearchParams({ search });
+        const result = await app.inject({ url: `/management/payees?${query}`, headers });
+        expect(result.json()).toMatchObject({
+          rows: [{ name, aliases: [{ name: 'Original descriptor' }] }],
+        });
+      }
     },
   );
+
+  it('returns an editor suggestion without changing the payee', async () => {
+    const suggestion = { categoryId: 'food', confidence: 0.95, reason: 'Coffee shop' };
+    const enrich = vi.fn(async () => ({
+      status: 'success' as const,
+      suggestion,
+      model: 'test',
+      durationMs: 0,
+      httpStatus: 200,
+      response: {},
+    }));
+    const { app, store, login, config } = await managementFixture(
+      new PayeeSuggestions({ enrich }, 0.7),
+    );
+    config.eligibleCategories = [{ id: 'food', name: 'Food' }];
+    store.payees.refresh({
+      payees: [{ id: 'coffee', name: 'Coffee' }],
+      categories: config.eligibleCategories,
+      tags: [],
+    });
+    const row = store.payees.list('', 0, 1)[0]!;
+    const headers = { origin, cookie: sessionCookie(await login()) };
+    const response = await app.inject({
+      method: 'POST',
+      url: '/management/payees/suggestion',
+      headers,
+      payload: { id: row.id, revision: row.revision },
+    });
+    expect(response.json()).toEqual({ suggestion });
+    expect(enrich).toHaveBeenCalledWith({
+      payee: 'Coffee',
+      categories: [{ id: 'food', name: 'Food' }],
+    });
+    expect(store.payees.get(row.id)).toEqual(row);
+  });
 
   it('reports a failed live validation without claiming a successful config save', async () => {
     const f = await managementFixture();

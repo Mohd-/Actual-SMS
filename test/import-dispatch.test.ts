@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'node:path';
 import { EventStore } from '../src/db.js';
 import { Processor } from '../src/processor.js';
-import { NoopEnricher } from '../src/enricher.js';
 import { ConfigEditor } from '../src/config-editor.js';
 import { runtimeFixture } from './fixtures/runtime.js';
 import type { ActualTransaction } from '../src/types.js';
@@ -37,18 +36,15 @@ async function setup() {
     ledger.set(key, structuredClone(transaction));
     return { added: existing ? [] : [key], updated: existing ? [key] : [], errors: [] };
   };
-  const ai = new NoopEnricher();
-  const enrich = vi.spyOn(ai, 'enrich');
+
   return {
     ...f,
     ledger,
     requests,
-    enrich,
     get store() {
       return store;
     },
-    processor: () =>
-      new Processor(store, f.actual, ai, f.config, 5, 0.7, undefined, f.runtime.gate),
+    processor: () => new Processor(store, f.actual, f.config, 5, f.runtime.gate),
     due: () => store.update('purchase', 'queued', { nextAttemptAt: new Date(0).toISOString() }),
     reopen: () => {
       store.close();
@@ -106,7 +102,6 @@ describe('durable ordinary import execution', () => {
       f.requests.every(request => JSON.stringify(request) === JSON.stringify(f.requests[0])),
     ).toBe(true);
     if (stage === 'deduplication without IDs') expect(f.requests).toHaveLength(1);
-    expect(f.enrich).toHaveBeenCalledTimes(1);
   });
 
   it('commits identity reservations and dispatch intent atomically before any Actual write', async () => {
@@ -151,7 +146,7 @@ describe('durable ordinary import execution', () => {
     expect(f.actual.importTransactions).not.toHaveBeenCalled();
   });
 
-  it('does not recalculate a foreign amount or enrich again after freezing the write', async () => {
+  it('does not recalculate a foreign amount or look up payee defaults again after freezing the write', async () => {
     const f = await setup();
     const previous = vi.spyOn(f.store, 'previousBalance').mockReturnValue(20_000);
     f.actual.sync = async () => {
@@ -172,7 +167,6 @@ describe('durable ordinary import execution', () => {
     expect(f.requests).toHaveLength(1);
     expect(f.requests[0]?.transaction.amount).toBe(-5000);
     expect(previous).toHaveBeenCalledTimes(1);
-    expect(f.enrich).toHaveBeenCalledTimes(1);
   });
 
   it('resumes the frozen account and payload after sync failure, YAML activation, and restart', async () => {
@@ -197,6 +191,5 @@ describe('durable ordinary import execution', () => {
     expect(f.requests).toHaveLength(1);
     expect(f.requests[0]?.account).toBe('checking');
     expect(f.ledger.size).toBe(1);
-    expect(f.enrich).toHaveBeenCalledTimes(1);
   });
 });

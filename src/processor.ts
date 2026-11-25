@@ -1,7 +1,7 @@
 import { DateTime } from 'luxon';
 import type {
   ActualAdapter,
-  Enricher,
+  ActualTransaction,
   ParsedTransaction,
   ResolvedConfig,
   SmsInput,
@@ -9,8 +9,6 @@ import type {
 import { EventStore, type StoredEvent, type ImportExecution } from './db.js';
 import { PARSER_REVISION, parseSms } from './parser.js';
 import { resolveAccount, resolveBillPaymentAccount, resolveTransferAccount } from './routing.js';
-import { MerchantResolver } from './merchant-resolver.js';
-import { merchantKey } from './merchant-key.js';
 import { importId } from './import-identity.js';
 import { WorkGate } from './work-gate.js';
 import {
@@ -24,25 +22,54 @@ export class Processor {
   private timer?: NodeJS.Timeout;
   private running = false;
   private stopped = false;
-  private merchantResolver: MerchantResolver;
   constructor(
     private store: EventStore,
     private actual: ActualAdapter,
-    private ai: Enricher,
     private config: ResolvedConfig,
     private maxAttempts = 5,
-    minConfidence = 0.7,
-    merchantResolver?: MerchantResolver,
     private gate = new WorkGate(),
-  ) {
-    this.merchantResolver =
-      merchantResolver ?? new MerchantResolver(store, actual, config, minConfidence);
+  ) {}
+  private refreshingPayees?: Promise<void>;
+  async refreshPayees() {
+    this.refreshingPayees ??= this.refreshPayeeCatalog().finally(() => {
+      this.refreshingPayees = undefined;
+    });
+    return this.refreshingPayees;
   }
-  async refreshMappings() {
+  private async refreshPayeeCatalog() {
     const release = this.gate.enter();
     if (!release) return;
     try {
-      await this.merchantResolver.refresh();
+      await this.actual.sync();
+      const [payees, tags, allCategories] = await Promise.all([
+        this.actual.payees(),
+        this.actual.tags(),
+        this.actual.categories(),
+      ]);
+      const categories = allCategories
+        .filter(category => !category.isIncome && !category.hidden)
+        .map(({ id, name, groupName }) => ({ id, name, groupName }));
+      const history = this.store.payees.migrationPending
+        ? (
+            await Promise.all(
+              [...new Set(this.config.accounts.map(account => account.id))].map(id =>
+                this.actual.transactions(id, '1900-01-01', '9999-12-31'),
+              ),
+            )
+          ).flat()
+        : [];
+      this.store.payees.refresh({ payees, categories, tags }, history);
+      this.config.expenseCategories = categories;
+      const allowedNames = this.config.aiCategoryNames;
+      const candidates = categories.filter(
+        category => category.id !== this.config.bankFeesCategoryId,
+      );
+      this.config.eligibleCategories = allowedNames
+        ? [...new Set(allowedNames)].flatMap(name => {
+            const matches = candidates.filter(category => category.name === name);
+            return matches.length === 1 ? matches : [];
+          })
+        : candidates;
     } finally {
       release();
     }
@@ -60,7 +87,7 @@ export class Processor {
     while (this.running) await new Promise(r => setTimeout(r, 20));
   }
   async tick() {
-    if (this.running || this.stopped) return;
+    if (this.running || this.stopped || this.store.payees.migrationPending) return;
     const release = this.gate.enter();
     if (!release) return;
     let event: StoredEvent | undefined;
@@ -98,6 +125,7 @@ export class Processor {
     if (plan.version !== 1)
       throw new Error('Unsupported import execution version; reconciliation required');
     if (!execution.complete) {
+      let addedMain: string | undefined;
       for (const part of ['main', 'principal', 'fee'] as const) {
         const transaction = plan[part];
         const done = {
@@ -115,10 +143,27 @@ export class Processor {
         );
         if (result.errors.length)
           throw new Error(result.errors.map(error => error.message).join('; '));
+        // A reconciled row may retain the existing payee from a different transaction.
+        if (part === 'main') addedMain = result.added[0];
       }
       await this.actual.sync();
       this.store.completeImport(event.id, plan);
+      if (
+        addedMain &&
+        plan.main &&
+        !plan.main.preservePendingAssignment &&
+        plan.parsed.kind !== 'withdrawal'
+      ) {
+        await this.observeImportedPayee(plan.accountId, plan.main, addedMain).catch(() => {
+          console.warn('Could not verify Actual payee for alias discovery');
+        });
+      }
     } else this.store.update(event.id, plan.review ? 'imported_review' : 'imported');
+  }
+  private async observeImportedPayee(accountId: string, main: ActualTransaction, actualId: string) {
+    if (!main.imported_payee || !this.store.payees.shouldObserveActual(main.imported_payee)) return;
+    const payee = await this.actual.importedTransactionPayee(accountId, actualId, main.imported_id);
+    if (payee) this.store.payees.observeActual(main.imported_payee, payee);
   }
   private waitForTransfer(event: StoredEvent, ownerId: string) {
     const owner = this.store.get(ownerId)!;
@@ -212,76 +257,6 @@ export class Processor {
       review = true;
     }
     this.store.update(event.id, 'processing', { parsed: tx, parserRevision: PARSER_REVISION });
-    let selectedPayee = tx.payee;
-    let selectedCategory: string | undefined;
-    let preservePendingAssignment = false;
-    if (!isTransfer && tx.kind !== 'withdrawal') {
-      const merchant = merchantKey(tx.payee);
-      let assignment = merchant ? this.merchantResolver.lookup(account.id, tx.payee) : undefined;
-      if (merchant && (!assignment || this.merchantResolver.canReplaceHistory(assignment))) {
-        assignment = undefined;
-        const request = {
-          merchant: tx.payee,
-          location: input.location,
-          occurredAt: tx.occurredAt,
-          categories: this.config.eligibleCategories,
-        };
-        this.store.recordEnrichment(event.id, 'history_miss', {
-          merchant: tx.payee,
-          merchantKey: merchant,
-          accountId: account.id,
-        });
-        const started = Date.now();
-        const enrichment = await this.ai.enrich(request).catch(error => ({
-          status: 'network_error' as const,
-          durationMs: Date.now() - started,
-          error: error instanceof Error ? error.message : String(error),
-        }));
-        if (enrichment.status === 'success') {
-          this.store.merchantAssignments.suggest(
-            account.id,
-            merchant,
-            enrichment.suggestion,
-            event.id,
-            candidate => this.merchantResolver.canReplaceHistory(candidate),
-          );
-          assignment = this.merchantResolver.lookup(account.id, tx.payee);
-        } else {
-          this.store.recordEnrichment(event.id, `llm_${enrichment.status}`, {
-            request,
-            result: bounded(enrichment),
-          });
-        }
-      }
-      preservePendingAssignment = assignment?.status === 'pending';
-      const applied = assignment && this.merchantResolver.canApply(assignment);
-      if (assignment && applied) {
-        selectedPayee = assignment.payee;
-        selectedCategory = assignment.categoryId;
-      }
-      if (assignment) {
-        const status = {
-          approved: applied ? 'history_hit' : 'merchant_assignment_category_unavailable',
-          pending: 'merchant_assignment_pending',
-          deleted: 'merchant_assignment_deleted',
-        }[assignment.status];
-        this.store.recordEnrichment(event.id, status, {
-          merchant: tx.payee,
-          merchantKey: merchant,
-          accountId: account.id,
-          payee: assignment.payee,
-          categoryId: assignment.categoryId,
-          source: assignment.source,
-          sourceRef: assignment.sourceRef,
-          confidence: assignment.confidence,
-        });
-      }
-    } else {
-      this.store.recordEnrichment(event.id, 'not_applicable', {
-        reason: isTransfer ? 'transfer' : 'withdrawal',
-        kind: tx.kind,
-      });
-    }
     const date = DateTime.fromISO(tx.occurredAt, { setZone: true }).toISODate()!;
     const notes = [
       tx.note,
@@ -367,33 +342,49 @@ export class Processor {
       }));
       return this.resumeImport(event, planned);
     } else {
-      const planned = this.store.beginImport(event.id, () => ({
-        version: 1,
-        kind: 'ordinary',
-        accountId: account.id,
-        sourceKey: account.key,
-        parsed: tx,
-        principalCents: tx.amountCents!,
-        review,
-        main: {
-          date,
-          amount: tx.amountCents!,
-          payee_name: selectedPayee,
-          imported_payee: tx.payee,
-          category: selectedCategory,
-          ...(preservePendingAssignment ? { preservePendingAssignment: true } : {}),
-          notes,
-          imported_id: id(),
-        },
-      }));
+      const planned = this.store.beginImport(event.id, () => {
+        const defaults =
+          tx.kind === 'withdrawal'
+            ? undefined
+            : this.store.payees.defaults(tx.payee, this.config.expenseCategories);
+        if (defaults?.categoryId || defaults?.tags.length) {
+          this.store.recordEnrichment(event.id, 'payee_defaults_submitted', {
+            payee: defaults.name,
+            payeeId: defaults.payeeId,
+            categoryId: defaults.categoryId,
+            tags: defaults.tags,
+          });
+        }
+        const taggedNotes = defaults?.tags.length ? appendTags(notes, defaults.tags) : notes;
+        return {
+          version: 1,
+          kind: 'ordinary',
+          accountId: account.id,
+          sourceKey: account.key,
+          parsed: tx,
+          principalCents: tx.amountCents!,
+          review,
+          main: {
+            date,
+            amount: tx.amountCents!,
+            ...(defaults?.payeeId
+              ? { payee: defaults.payeeId }
+              : { payee_name: defaults?.name ?? tx.payee }),
+            imported_payee: tx.payee,
+            category: defaults?.categoryId,
+            notes: taggedNotes,
+            imported_id: id(),
+          },
+        };
+      });
       return this.resumeImport(event, planned);
     }
   }
 }
 
-function bounded(value: unknown): unknown {
-  const serialized = JSON.stringify(value);
-  return serialized.length <= 65_536
-    ? value
-    : { truncated: true, value: serialized.slice(0, 65_536) };
+function appendTags(notes: string, tags: string[]) {
+  const existing = new Set([...notes.matchAll(/(?:^|[^#])#([^#\s]+)/gu)].map(match => match[1]));
+  return [notes, ...tags.filter(tag => !existing.has(tag)).map(tag => `#${tag}`)]
+    .filter(Boolean)
+    .join(' ');
 }

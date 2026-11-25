@@ -1,4 +1,4 @@
-import { loadActualApi } from './actual-sdk.js';
+import { loadActualApi, type ActualSession } from './actual-sdk.js';
 import { preflightActualVersion } from './actual-version.js';
 import type { ActualAdapter, ActualTransaction } from './types.js';
 
@@ -11,11 +11,12 @@ export class ActualApiAdapter implements ActualAdapter {
       encryptionPassword?: string;
       dataDir: string;
     },
+    private session?: ActualSession,
   ) {}
   async initialize() {
     await preflightActualVersion(this.options.serverURL);
     const actual = await loadActualApi();
-    await actual.init({
+    this.session = await actual.init({
       serverURL: this.options.serverURL,
       password: this.options.password,
       dataDir: this.options.dataDir,
@@ -30,6 +31,7 @@ export class ActualApiAdapter implements ActualAdapter {
   }
   async shutdown() {
     const actual = await loadActualApi();
+    this.session = undefined;
     await actual.shutdown();
   }
   async sync() {
@@ -44,28 +46,61 @@ export class ActualApiAdapter implements ActualAdapter {
   }
   async categories() {
     const actual = await loadActualApi();
-    const groups = await actual.getCategories();
-    return groups.map(c => ({
-      id: c.id,
-      name: c.name,
-      groupName: (c as any).group?.name,
-      isIncome: Boolean((c as any).is_income),
-      hidden: Boolean((c as any).hidden),
+    return (await actual.getCategoryGroups()).flatMap(group =>
+      (group.categories ?? []).map(category => ({
+        id: category.id,
+        name: category.name,
+        groupName: group.name,
+        isIncome: Boolean(category.is_income),
+        hidden: Boolean(category.hidden),
+      })),
+    );
+  }
+  async payees() {
+    const actual = await loadActualApi();
+    return (await actual.getPayees()).map(payee => ({
+      id: payee.id,
+      name: payee.name,
+      transferAccountId: payee.transfer_acct ?? undefined,
     }));
+  }
+  async tags() {
+    if (!this.session) throw new Error('Actual session is unavailable');
+    // The high-level getTags() drops the hidden flag in the pinned SDK.
+    const tags = (await this.session.send('tags-get')) as {
+      id: string;
+      tag: string;
+      hidden: boolean;
+    }[];
+    return tags.map(tag => ({ id: tag.id, name: tag.tag, hidden: tag.hidden }));
   }
   async transactions(accountId: string, startDate: string, endDate: string) {
     const actual = await loadActualApi();
-    const payees = new Map((await actual.getPayees()).map(payee => [payee.id, payee.name]));
     return (await actual.getTransactions(accountId, startDate, endDate)).map(transaction => ({
       id: transaction.id,
       accountId: transaction.account,
       date: transaction.date,
-      payeeName: transaction.payee ? payees.get(transaction.payee) : undefined,
+      payeeId: transaction.payee ?? undefined,
       importedPayee: transaction.imported_payee,
       categoryId: transaction.category,
       importedId: transaction.imported_id,
       transferId: transaction.transfer_id,
     }));
+  }
+  async importedTransactionPayee(accountId: string, transactionId: string, importedId: string) {
+    const actual = await loadActualApi();
+    const { data } = (await actual.aqlQuery(
+      actual
+        .q('transactions')
+        .filter({
+          id: transactionId,
+          account: accountId,
+          imported_id: importedId,
+          transfer_id: null,
+        })
+        .select(['payee']),
+    )) as { data: { payee: string | null }[] };
+    return data[0]?.payee ?? undefined;
   }
   async transferPayee(accountId: string) {
     const actual = await loadActualApi();
@@ -76,6 +111,7 @@ export class ActualApiAdapter implements ActualAdapter {
   async importTransactions(accountId: string, transactions: ActualTransaction[]) {
     const actual = await loadActualApi();
     const pending = transactions.some(transaction => transaction.preservePendingAssignment);
+    // Only frozen import plans from the merchant-approval release carry this flag.
     if (pending && !('actualSmsPendingAssignmentImport' in actual))
       throw new Error('Actual SDK pending-assignment import support is missing');
     return actual.importTransactions(accountId, transactions as any, {

@@ -25,7 +25,10 @@ export async function runtimeFixture() {
     serverVersion: async () => '26.11.0',
     accounts: async () => [{ id: 'checking', name: 'Checking' }],
     categories: async () => [{ id: 'fees', name: 'Fees' }],
+    payees: async () => [],
+    tags: async () => [],
     transactions: async () => [],
+    importedTransactionPayee: async () => undefined,
     transferPayee: async () => 'transfer',
     importTransactions: async () => ({ added: [], updated: [], errors: [] }),
   };

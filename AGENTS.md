@@ -16,7 +16,7 @@
 
 ## Architecture
 
-Single Fastify service that queues Tasker SMS events, parses them, and imports transactions into Actual Budget. Flow: `server.ts` (HTTP `/v1/sms`, `/v1/events`) → `db.ts` (better-sqlite3 durable queue + audit) → `processor.ts` (retries, enrichment) → `parser.ts` → `routing.ts` → `actual.ts` (Actual import) with `enricher.ts` (OpenCode Go LLM, optional) and `merchant-resolver.ts` (history-first mapping, no LLM on hit).
+Single Fastify service that queues Tasker SMS events, parses them, and imports transactions into Actual Budget. Flow: `server.ts` (HTTP `/v1/sms`, `/v1/events`) → `db.ts` (better-sqlite3 durable queue + audit) → `processor.ts` (retries, enrichment) → `parser.ts` → `routing.ts` → `actual.ts` (Actual import) with `payees.ts` (SQLite payee defaults) and `enricher.ts` (optional OpenCode Go category suggestions in the management editor).
 
 - `config/parsing.yaml` holds shared English/Arabic recognition and extraction rules plus optional bank-selected message templates; the TypeScript parser engine is shared. Bank identification lives separately in `sms-source.ts` and only feeds routing. Runtime loads parser configuration via `PARSING_CONFIG_PATH`. Regex rule order in the shared grammar is semantic: specific kinds (card payment, transfer) must precede generic ones (purchase).
 - Bank IDs, exact sender aliases, legacy message aliases, and import/review disposition live in `config/banks.yaml`. Runtime loads it via `BANKS_CONFIG_PATH`; setup reads the repository registry. New banks with recognized wording require YAML changes only.

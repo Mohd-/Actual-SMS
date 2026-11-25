@@ -1,8 +1,8 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 
-// Keep reconciliation and prevent rules from changing the first synced write
-// for a pending SMS merchant assignment.
+// Preserve reconciliation and the original first write for older frozen
+// import plans from the merchant-approval release.
 const entry = createRequire(import.meta.url).resolve('@actual-app/api');
 const original = readFileSync(entry, 'utf8');
 const marker = 'exports.actualSmsPendingAssignmentImport = true;';

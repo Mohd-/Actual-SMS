@@ -4,7 +4,6 @@ import { writeFile } from 'node:fs/promises';
 import { ConfigEditor } from '../src/config-editor.js';
 import { EventStore } from '../src/db.js';
 import { Processor } from '../src/processor.js';
-import { NoopEnricher } from '../src/enricher.js';
 import { runtimeFixture } from './fixtures/runtime.js';
 import type { ActualTransaction } from '../src/types.js';
 
@@ -56,11 +55,10 @@ async function setup() {
     new Processor(
       store,
       f.actual,
-      new NoopEnricher(),
+
       f.config,
       maxAttempts,
-      0.7,
-      undefined,
+
       f.runtime.gate,
     );
   const enqueue = (id: string, message = outgoing, sender = 'SAB') =>

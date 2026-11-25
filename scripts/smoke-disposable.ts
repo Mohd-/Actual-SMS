@@ -7,7 +7,6 @@ import { loadActualApi } from '../src/actual-sdk.js';
 import { ActualApiAdapter } from '../src/actual.js';
 import { EventStore } from '../src/db.js';
 import { Processor } from '../src/processor.js';
-import { NoopEnricher } from '../src/enricher.js';
 import { loadBankConfigFile } from '../src/config.js';
 import { loadParserConfig } from '../src/parsing/config.js';
 import { withDisposableBudget } from './disposable-budget.js';
@@ -101,12 +100,15 @@ async function main() {
         );
       });
       await actual.sync();
-      const adapter = new ActualApiAdapter({
-        serverURL,
-        password,
-        syncId: context.syncId,
-        dataDir: context.cacheDir,
-      });
+      const adapter = new ActualApiAdapter(
+        {
+          serverURL,
+          password,
+          syncId: context.syncId,
+          dataDir: context.cacheDir,
+        },
+        context.control,
+      );
       // The lifecycle has already initialized this SDK and loaded only the new budget.
       const banks = await loadBankConfigFile(process.env.BANKS_CONFIG_PATH ?? 'config/banks.yaml');
       const parsing = await loadParserConfig(
@@ -135,7 +137,7 @@ async function main() {
       };
       const store = new EventStore(':memory:');
       try {
-        const processor = new Processor(store, adapter, new NoopEnricher(), config);
+        const processor = new Processor(store, adapter, config);
         const receivedAt = '2026-08-22T00:31:00+03:00';
         const purchase = 'Purchase Card **1234 Amount SAR 25 at FOOTPRINT on 2026-08-22 00:30';
         store.enqueue({ eventId: 'purchase-one', sender: 'SAB', message: purchase, receivedAt });
@@ -171,12 +173,22 @@ async function main() {
         assert.equal(await actual.getAccountBalance(receiving), 10000);
         // Retry uses the persisted ID and must leave the real ledger unchanged.
         store.update('purchase-two', 'queued', { nextAttemptAt: new Date(0).toISOString() });
-        await new Processor(store, adapter, new NoopEnricher(), config).tick();
+        await new Processor(store, adapter, config).tick();
         assert.equal(
           (await actual.getTransactions(checking, '2026-08-22', '2026-08-22')).length,
           transactions.length,
         );
         const rulePayee = await actual.createPayee({ name: 'Rule-selected Payee' });
+        await actual.createPayee({ name: 'RuleTarget' });
+        const noRulePayee = await actual.createPayee({ name: 'NoRule' });
+        const shopping = await actual.createCategory({
+          name: 'SMS Smoke Shopping',
+          group_id: group,
+          is_income: false,
+        });
+        const tag = await actual.createTag({ tag: 'sms-smoke' });
+        const hiddenTag = await actual.createTag({ tag: 'hidden-smoke' });
+        await context.control.send('tags-update', { id: hiddenTag, hidden: true });
         await actual.createRule({
           stage: 'pre',
           conditionsOp: 'and',
@@ -184,8 +196,24 @@ async function main() {
           actions: [
             { op: 'set', field: 'payee', value: rulePayee },
             { op: 'set', field: 'category', value: fees },
+            { op: 'set', field: 'notes', value: 'Set by Actual' },
           ],
         });
+        await actual.createRule({
+          stage: 'pre',
+          conditionsOp: 'and',
+          conditions: [{ op: 'is', field: 'imported_payee', value: 'RULEALIAS' }],
+          actions: [{ op: 'set', field: 'payee', value: noRulePayee }],
+        });
+        await processor.refreshPayees();
+        assert.equal(
+          store.payees.catalog.tags.some(value => value.id === hiddenTag),
+          false,
+        );
+        for (const name of ['ruletarget', 'norule']) {
+          const row = store.payees.list(name, 0, 1)[0]!;
+          store.payees.save(row.id, row.revision, shopping, [tag]);
+        }
         const enqueuePurchase = (eventId: string, amount: number, merchant: string) =>
           store.enqueue({
             eventId,
@@ -196,22 +224,7 @@ async function main() {
         enqueuePurchase('rule-control', 71, 'RULETARGET');
         await processor.tick();
 
-        const enqueuePending = (eventId: string, amount: number, merchant: string) => {
-          store.merchantAssignments.suggest(
-            checking,
-            merchant.toLowerCase(),
-            {
-              payee: 'Proposed Name',
-              categoryId: fees,
-              confidence: 0.8,
-              reason: 'Smoke test',
-            },
-            eventId,
-          );
-          enqueuePurchase(eventId, amount, merchant);
-        };
-        enqueuePending('pending-rule', 72, 'RULETARGET');
-        enqueuePending('pending-no-rule', 73, 'NORULE');
+        enqueuePurchase('tagged', 72, 'NORULE');
         const importTransactions = adapter.importTransactions.bind(adapter);
         adapter.importTransactions = async (accountId, rows) => {
           const result = await importTransactions(accountId, rows);
@@ -221,36 +234,93 @@ async function main() {
           );
         };
         await processor.tick();
-        assert.equal(store.get('pending-rule')?.status, 'queued');
-        // Sync the first write before retrying to verify there is no miscategorized interim write.
+        assert.equal(store.get('tagged')?.status, 'queued');
         await actual.sync();
-        const pendingRows = () => actual.getTransactions(checking, '2026-08-22', '2026-08-22');
-        const first = (await pendingRows()).filter(tx => tx.amount === -7200);
+        const getRows = () => actual.getTransactions(checking, '2026-08-22', '2026-08-22');
+        const first = (await getRows()).filter(tx => tx.amount === -7200);
         assert.equal(first.length, 1);
-        assert.equal(first[0]?.category, null);
-        assert.equal(
-          (await actual.getPayees()).find(payee => payee.id === first[0]?.payee)?.name,
-          'RULETARGET',
-        );
-        store.update('pending-rule', 'queued', { nextAttemptAt: new Date(0).toISOString() });
-        const restarted = new Processor(store, adapter, new NoopEnricher(), config);
-        await restarted.tick();
-        await restarted.tick();
-        assert.equal(store.get('pending-rule')?.status, 'imported');
-        assert.equal(store.get('pending-no-rule')?.status, 'imported');
+        assert.equal(first[0]?.category, shopping);
+        assert.match(first[0]?.notes ?? '', /#sms-smoke\b/u);
 
-        const finalRows = await pendingRows();
+        const tagged = store.payees.list('norule', 0, 1)[0]!;
+        store.payees.save(tagged.id, tagged.revision, fees, []);
+        store.update('tagged', 'queued', { nextAttemptAt: new Date(0).toISOString() });
+        const restarted = new Processor(store, adapter, config);
+        await restarted.tick();
+        assert.equal(store.get('tagged')?.status, 'imported');
+
+        const matchId = 'sms-smoke-existing-native-reconcile';
+        await actual.importTransactions(checking, [
+          {
+            date: '2026-08-22',
+            amount: -7300,
+            imported_id: matchId,
+            account: checking,
+            payee: rulePayee,
+            category: fees,
+            notes: 'Existing notes',
+          },
+        ]);
+        await adapter.importTransactions(checking, [
+          {
+            date: '2026-08-22',
+            amount: -7300,
+            imported_id: matchId,
+            payee_name: 'NoRule',
+            category: shopping,
+            notes: '#sms-smoke',
+          },
+        ]);
+
+        enqueuePurchase('legacy-pending', 74, 'RULETARGET');
+        const frozen = store.importExecution('rule-control')!.plan!;
+        store.beginImport('legacy-pending', () => ({
+          ...frozen,
+          principalCents: 7400,
+          main: {
+            date: '2026-08-22',
+            amount: -7400,
+            imported_id: 'sms-smoke-legacy-pending',
+            payee_name: 'RULETARGET',
+            imported_payee: 'RULETARGET',
+            preservePendingAssignment: true,
+          },
+        }));
+        await restarted.tick();
+        assert.equal(
+          store.get('legacy-pending')?.status,
+          'imported',
+          store.get('legacy-pending')?.error ?? 'Legacy pending plan did not import',
+        );
+        const finalRows = await getRows();
         const control = finalRows.find(tx => tx.amount === -7100);
         assert.equal(control?.category, fees);
         assert.equal(control?.payee, rulePayee);
+        assert.equal(control?.notes, 'Set by Actual');
         assert.equal(finalRows.filter(tx => tx.amount === -7200).length, 1);
-        assert.equal(finalRows.find(tx => tx.amount === -7200)?.id, first[0]?.id);
-        const unrelated = finalRows.find(tx => tx.amount === -7300);
-        assert.equal(unrelated?.category, null);
-        assert.equal(
-          (await actual.getPayees()).find(payee => payee.id === unrelated?.payee)?.name,
-          'NORULE',
-        );
+        const retried = finalRows.find(tx => tx.amount === -7200);
+        assert.equal(retried?.id, first[0]?.id);
+        assert.equal(retried?.category, shopping);
+        assert.match(retried?.notes ?? '', /#sms-smoke\b/u);
+        const matched = finalRows.find(tx => tx.imported_id === matchId);
+        assert.equal(matched?.category, fees);
+        assert.equal(matched?.payee, rulePayee);
+        assert.equal(matched?.notes, 'Existing notes');
+        const pending = finalRows.find(tx => tx.amount === -7400);
+        assert.equal(pending?.category, null);
+        assert.notEqual(pending?.payee, rulePayee);
+        const canonical = store.payees.list('norule', 0, 1)[0]!;
+        store.payees.save(canonical.id, canonical.revision, shopping, [tag]);
+        enqueuePurchase('alias-discovery', 75, 'RULEALIAS');
+        await restarted.tick();
+        assert.equal(store.get('alias-discovery')?.status, 'imported');
+        assert.equal(store.payees.list('rulealias', 0, 1)[0]?.id, canonical.id);
+        enqueuePurchase('alias-defaults', 76, 'RULEALIAS');
+        await restarted.tick();
+        const learned = (await getRows()).find(tx => tx.amount === -7600);
+        assert.equal(learned?.payee, noRulePayee);
+        assert.equal(learned?.category, shopping);
+        assert.match(learned?.notes ?? '', /#sms-smoke\b/u);
         passed = true;
       } finally {
         store.close();
@@ -274,7 +344,9 @@ async function main() {
               'linked-transfer',
               'bank-fee',
               'retry-idempotency',
-              'pending-merchant-assignment-bypasses-actual-rules',
+              'payee-defaults-tags-and-native-rule-precedence',
+              'native-reconciliation-and-legacy-pending-replay',
+              'actual-rule-alias-discovery-on-new-import',
               'existing-budget-catalog-preserved',
             ],
           },

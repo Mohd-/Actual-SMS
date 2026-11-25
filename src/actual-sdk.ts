@@ -1,4 +1,5 @@
 type ActualApi = typeof import('@actual-app/api');
+export type ActualSession = Pick<Awaited<ReturnType<ActualApi['init']>>, 'send'>;
 
 let api: Promise<ActualApi> | undefined;
 

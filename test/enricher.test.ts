@@ -2,9 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { OpenCodeGoEnricher, OPENCODE_GO_CHAT_COMPLETIONS_URL } from '../src/enricher.js';
 
 const input = {
-  merchant: 'SAMPLE BOOKS',
-  location: { latitude: 24.7136, longitude: 46.6753 },
-  occurredAt: '2026-08-22T10:05:00+03:00',
+  payee: 'SAMPLE BOOKS',
   categories: [{ id: 'cat-shopping', name: 'Shopping' }],
 };
 
@@ -19,7 +17,6 @@ describe('OpenCode Go enricher', () => {
   it('calls Chat Completions in JSON mode and accepts an eligible category', async () => {
     const request = vi.fn<typeof fetch>().mockResolvedValue(
       completion({
-        payee: 'Sample Books',
         categoryId: 'cat-shopping',
         confidence: 0.96,
         reason: 'Known retailer',
@@ -31,7 +28,7 @@ describe('OpenCode Go enricher', () => {
 
     expect(result).toMatchObject({
       status: 'success',
-      suggestion: { payee: 'Sample Books', categoryId: 'cat-shopping' },
+      suggestion: { categoryId: 'cat-shopping' },
     });
     expect(request).toHaveBeenCalledOnce();
     const [url, init] = request.mock.calls[0]!;
@@ -49,16 +46,12 @@ describe('OpenCode Go enricher', () => {
     [
       'invalid schema',
       completion({
-        payee: 'Example Store',
         categoryId: 'cat-shopping',
         confidence: 2,
         reason: 'x',
       }),
     ],
-    [
-      'unknown category',
-      completion({ payee: 'Example Store', categoryId: 'unknown', confidence: 0.9, reason: 'x' }),
-    ],
+    ['unknown category', completion({ categoryId: 'unknown', confidence: 0.9, reason: 'x' })],
     ['rate limit', completion({}, 429)],
     ['exhausted Go limit', completion({}, 402)],
     ['provider failure', completion({}, 500)],
@@ -84,7 +77,6 @@ describe('OpenCode Go enricher', () => {
   it('sends only the approved enrichment fields', async () => {
     const request = vi.fn<typeof fetch>().mockResolvedValue(
       completion({
-        payee: 'Example Store',
         categoryId: 'cat-shopping',
         confidence: 0.9,
         reason: 'x',
@@ -94,12 +86,7 @@ describe('OpenCode Go enricher', () => {
     const body = JSON.parse(String(request.mock.calls[0]![1]?.body));
     const outbound = JSON.parse(body.messages[1].content);
 
-    expect(Object.keys(outbound).sort()).toEqual([
-      'categories',
-      'location',
-      'merchant',
-      'occurredAt',
-    ]);
+    expect(outbound).toEqual(input);
     expect(JSON.stringify(body)).not.toMatch(/raw|sms|balance|alias|account|personal/i);
   });
 });

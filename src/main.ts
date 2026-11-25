@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { loadEnv } from './config.js';
 import { EventStore } from './db.js';
 import { ActualApiAdapter } from './actual.js';
-import { NoopEnricher, OpenCodeGoEnricher } from './enricher.js';
+import { OpenCodeGoEnricher, PayeeSuggestions } from './enricher.js';
 import { Processor } from './processor.js';
 import { migrateImportIdentities } from './import-identity.js';
 import { buildServer } from './server.js';
@@ -55,29 +55,22 @@ try {
         'Actual unavailable; imports paused. Use management to retry the configured connection.',
       );
     });
-  const ai = env.OPENCODE_GO_API_KEY
-    ? new OpenCodeGoEnricher(env.OPENCODE_GO_API_KEY, env.OPENCODE_GO_MODEL)
-    : new NoopEnricher();
-  const processor = new Processor(
-    store,
-    actual,
-    ai,
-    config,
-    env.MAX_ATTEMPTS,
-    env.ENRICHMENT_MIN_CONFIDENCE,
-    undefined,
-    runtime.gate,
-  );
-  await processor
-    .refreshMappings()
-    .catch(() => console.warn('Initial mapping refresh failed; using persisted mappings'));
+  const suggestions =
+    env.MANAGEMENT_ENABLED && env.OPENCODE_GO_API_KEY
+      ? new PayeeSuggestions(
+          new OpenCodeGoEnricher(env.OPENCODE_GO_API_KEY, env.OPENCODE_GO_MODEL),
+          env.ENRICHMENT_MIN_CONFIDENCE,
+        )
+      : undefined;
+  const processor = new Processor(store, actual, config, env.MAX_ATTEMPTS, runtime.gate);
+  await processor.refreshPayees().catch(() => console.warn('Initial payee catalog refresh failed'));
   const credentials = new ManagementCredentials(store.db);
   const app = buildServer({
     apiKey: env.API_KEY,
     banks: () => config.banks,
     store,
     processor,
-    ready: () => runtime.status().ready,
+    ready: () => runtime.status().ready && !store.payees.migrationPending,
     logger: env.LOG_LEVEL,
     taskerCredentials: credentials,
     maintenance: {
@@ -99,18 +92,19 @@ try {
           origin: env.MANAGEMENT_URL!,
           passwordHash: env.MANAGEMENT_PASSWORD_HASH!,
           secret: env.MANAGEMENT_SECRET!,
+          suggestions,
           refresh: () =>
             processor
-              .refreshMappings()
-              .catch(() => app.log.warn('Mapping refresh failed; using persisted mappings')),
+              .refreshPayees()
+              .catch(() => app.log.warn('Payee catalog refresh failed; using persisted catalog')),
         }
       : undefined,
   });
   const timer = setInterval(
     () =>
       void processor
-        .refreshMappings()
-        .catch(() => app.log.warn('Mapping refresh failed; using persisted mappings')),
+        .refreshPayees()
+        .catch(() => app.log.warn('Payee catalog refresh failed; using persisted catalog')),
     env.MAPPING_REFRESH_MINUTES * 60000,
   );
   timer.unref();

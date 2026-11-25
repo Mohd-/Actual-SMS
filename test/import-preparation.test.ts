@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import { EventStore } from '../src/db.js';
 import { Runtime } from '../src/runtime.js';
 import { Processor } from '../src/processor.js';
-import { NoopEnricher } from '../src/enricher.js';
 import { legacyImportId, migrateImportIdentities } from '../src/import-identity.js';
 import { parseSms } from '../src/parser.js';
 import { runtimeFixture } from './fixtures/runtime.js';
@@ -68,11 +67,10 @@ describe('historical identity preparation', () => {
     const processor = new Processor(
       f.store,
       f.actual,
-      new NoopEnricher(),
+
       f.config,
       5,
-      0.7,
-      undefined,
+
       f.runtime.gate,
     );
     f.store.enqueue({ ...input, eventId: 'fresh' });
@@ -133,7 +131,7 @@ describe('historical identity preparation', () => {
       ready: false,
       error: expect.stringContaining('preparation'),
     });
-    const processor = new Processor(f.store, f.actual, new NoopEnricher(), f.config);
+    const processor = new Processor(f.store, f.actual, f.config);
     await processor.tick();
     expect(f.store.eventHistory('fresh')).toHaveLength(1);
     expect(f.store.get('historical')?.status).toBe('imported');
