@@ -3,7 +3,10 @@ import { constants } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Runtime } from './runtime.js';
+import type { ConfigFiles } from './runtime-config.js';
 import { configRevision, readConfigFiles } from './runtime-config.js';
+
+export type EditableConfigFile = 'accounts' | 'banks' | 'parsing';
 
 export class ConfigConflict extends Error {
   constructor() {
@@ -14,36 +17,63 @@ export class ConfigEditor {
   constructor(
     private runtime: Runtime,
     private editable = false,
+    private editableBanks = false,
+    private editableParsing = false,
   ) {}
-  private async checkPath() {
-    const path = resolve(this.runtime.paths.accounts);
+  private path(file: EditableConfigFile) {
+    return file === 'accounts'
+      ? this.runtime.paths.accounts
+      : file === 'banks'
+        ? this.runtime.paths.banks
+        : this.runtime.paths.parsing;
+  }
+  private enabled(file: EditableConfigFile) {
+    return file === 'accounts'
+      ? this.editable
+      : file === 'banks'
+        ? this.editableBanks
+        : this.editableParsing;
+  }
+  private async checkPath(file: EditableConfigFile) {
+    const path = resolve(this.path(file));
     const info = await lstat(path);
     if (!info.isFile() || (await realpath(path)) !== path)
-      throw new Error('Account configuration must be a regular file without symlinks');
+      throw new Error('Configuration must be a regular file without symlinks');
     return info;
   }
+  private async writable(file: EditableConfigFile) {
+    if (!this.enabled(file)) return false;
+    return access(dirname(this.path(file)), constants.W_OK).then(
+      () => true,
+      () => false,
+    );
+  }
   async read() {
-    await this.checkPath();
+    await this.checkPath('accounts');
     const files = await readConfigFiles(this.runtime.paths);
-    let writable = this.editable;
-    if (writable)
-      await access(dirname(this.runtime.paths.accounts), constants.W_OK).catch(() => {
-        writable = false;
-      });
+    const editableFiles = {
+      accounts: await this.writable('accounts'),
+      banks: await this.writable('banks'),
+      parsing: await this.writable('parsing'),
+    };
     return {
       ...files,
       revision: configRevision(files),
       activeRevision: this.runtime.status().activeRevision,
-      editable: writable,
+      editable: editableFiles.accounts,
+      editableFiles,
     };
   }
-  async preview(accounts: string, expected: string) {
+  async previewFile(file: EditableConfigFile, content: string, expected: string) {
     return this.runtime.withConfiguration(async validate => {
       const current = await this.read();
       if (current.revision !== expected) throw new ConfigConflict();
-      await validate({ ...current, accounts });
+      await validate({ ...current, [file]: content });
       return { valid: true, revision: expected };
     });
+  }
+  async preview(accounts: string, expected: string) {
+    return this.previewFile('accounts', accounts, expected);
   }
   async reload(expected: string) {
     return this.runtime.withConfiguration(async validate => {
@@ -55,17 +85,17 @@ export class ConfigEditor {
       return this.read();
     });
   }
-  async save(accounts: string, expected: string) {
-    if (!this.editable) throw new Error('Configuration is read-only');
+  async saveFile(file: EditableConfigFile, content: string, expected: string) {
+    if (!this.enabled(file)) throw new Error('Configuration is read-only');
+    const path = this.path(file);
     return this.runtime.withConfiguration(async validate => {
       const current = await this.read();
-      if (!current.editable) throw new Error('Configuration directory is read-only');
+      if (!current.editableFiles[file]) throw new Error('Configuration directory is read-only');
       if (current.revision !== expected) throw new ConfigConflict();
-      const candidate = { accounts, banks: current.banks, parsing: current.parsing };
+      const candidate: ConfigFiles = { ...current, [file]: content };
       const snapshot = await validate(candidate);
-      const info = await this.checkPath();
+      const info = await this.checkPath(file);
       if ((await this.read()).revision !== expected) throw new ConfigConflict();
-      const path = this.runtime.paths.accounts;
       const temporary = `${path}.${randomUUID()}.tmp`;
       const backup = `${path}.previous`;
       const backupTemporary = `${backup}.${randomUUID()}.tmp`;
@@ -73,7 +103,7 @@ export class ConfigEditor {
       try {
         const previous = await open(backupTemporary, 'wx', 0o600);
         try {
-          await previous.writeFile(current.accounts);
+          await previous.writeFile(current[file]);
           await previous.sync();
         } finally {
           await previous.close();
@@ -83,16 +113,16 @@ export class ConfigEditor {
         await link(backupTemporary, backup).catch(error => {
           if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         });
-        const file = await open(temporary, 'wx', info.mode & 0o777);
+        const fileHandle = await open(temporary, 'wx', info.mode & 0o777);
         try {
-          const temporaryInfo = await file.stat();
+          const temporaryInfo = await fileHandle.stat();
           if (temporaryInfo.uid !== info.uid || temporaryInfo.gid !== info.gid)
-            await file.chown(info.uid, info.gid);
-          await file.chmod(info.mode & 0o777);
-          await file.writeFile(accounts);
-          await file.sync();
+            await fileHandle.chown(info.uid, info.gid);
+          await fileHandle.chmod(info.mode & 0o777);
+          await fileHandle.writeFile(content);
+          await fileHandle.sync();
         } finally {
-          await file.close();
+          await fileHandle.close();
         }
         if ((await this.read()).revision !== expected) throw new ConfigConflict();
         await rename(temporary, path);
@@ -117,5 +147,8 @@ export class ConfigEditor {
         await unlink(backupTemporary).catch(() => {});
       }
     });
+  }
+  async save(accounts: string, expected: string) {
+    return this.saveFile('accounts', accounts, expected);
   }
 }

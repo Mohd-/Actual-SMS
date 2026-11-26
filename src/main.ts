@@ -87,7 +87,12 @@ try {
     management: env.MANAGEMENT_ENABLED
       ? {
           runtime,
-          editor: new ConfigEditor(runtime, env.MANAGEMENT_EDIT_ACCOUNTS),
+          editor: new ConfigEditor(
+            runtime,
+            env.MANAGEMENT_EDIT_ACCOUNTS,
+            env.MANAGEMENT_EDIT_BANKS,
+            env.MANAGEMENT_EDIT_PARSING,
+          ),
           credentials,
           origin: env.MANAGEMENT_URL!,
           passwordHash: env.MANAGEMENT_PASSWORD_HASH!,
