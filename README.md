@@ -88,7 +88,7 @@ If no events arrive, check Tasker's run log, SMS permission, project variables, 
 
 ## Optional web management
 
-An opt-in management page provides importer status, read-only SMS audit, YAML-backed account editing, and Tasker project/checkpoint management. Existing headless deployments keep working unchanged. The browser does not introduce another configuration authority, parser, or financial dashboard; manual transaction approval is not enabled.
+An opt-in management page provides importer status, read-only SMS audit, interactive payee defaults, structured account routing and bank editing, a recognition grammar workbench with a live SMS tester, and Tasker project/checkpoint management. Existing headless deployments keep working unchanged. The browser does not introduce another configuration authority, parser, or financial dashboard; manual transaction approval is not enabled.
 
 See [Browser management](docs/management.md) for secure provisioning, read-only and writable-directory deployment options, verification, and rollback. The [adoption plan](docs/web-management-adoption-plan.md) records the scope and the separate manual-review design gate.
 
@@ -275,7 +275,7 @@ The Tasker SQL query uses `|~sms~|` as its column divider. The server also accep
 
 ## Payees, categories, tags, and privacy
 
-Open **Payees** in the management console to see payees from Actual and merchants from SMS imports. Link alternate SMS descriptors to a payee so imports across accounts can share its optional category and tags. Choose from existing Actual categories and tags. Saving changes future SMS import plans, and Actual's native rules still take priority during import.
+Open **Payees** in the management console to see payees from Actual and merchants from SMS imports in an interactive table. Set categories directly in the table, or open a payee to edit tags and link alternate SMS descriptors so imports across accounts can share the same defaults. Choose from existing Actual categories and tags. Saving changes future SMS import plans, and Actual's native rules still take priority during import.
 
 Opening an uncategorized payee in the editor can request an OpenCode Go suggestion. The request contains the payee name and eligible category names and IDs. **Use suggestion** fills the category field. **Save defaults** applies the choice. The default model is `deepseek-v4-flash`. Set `OPENCODE_GO_MODEL` to change it.
 
