@@ -21,6 +21,12 @@ describe('management provisioning and durable phone state', () => {
     expect(() => loadEnv({ ...environment, MANAGEMENT_EDIT_ACCOUNTS: '1' })).toThrow(
       'requires management',
     );
+    expect(() => loadEnv({ ...environment, MANAGEMENT_EDIT_BANKS: '1' })).toThrow(
+      'requires management',
+    );
+    expect(() => loadEnv({ ...environment, MANAGEMENT_EDIT_PARSING: '1' })).toThrow(
+      'requires management',
+    );
     expect(() => loadEnv({ ...environment, MANAGEMENT_URL: 'http://public.example.test' })).toThrow(
       'HTTPS',
     );

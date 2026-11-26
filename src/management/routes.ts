@@ -4,6 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import { compare } from 'bcryptjs';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { resolve, sep } from 'node:path';
 import { z } from 'zod';
 import type { Runtime } from '../runtime.js';
 import { ConfigConflict, type ConfigEditor } from '../config-editor.js';
@@ -13,8 +14,11 @@ import { taskerProject } from '../tasker-export.js';
 import { PayeeConflict } from '../payees.js';
 import type { PayeeSuggestions } from '../enricher.js';
 import { merchantKey } from '../merchant-key.js';
-import { ConfigurationError } from '../runtime-config.js';
+import { ConfigurationError, parseConfigFiles } from '../runtime-config.js';
 import type { ManagementCredentials } from './credentials.js';
+import { applyConfigPatches, modelFromFiles } from './config-model.js';
+import type { ConfigFile, ConfigPatch } from './contracts.js';
+import { parseSms } from '../parser.js';
 
 declare module '@fastify/secure-session' {
   interface SessionData {
@@ -99,6 +103,19 @@ export async function registerManagement(
   app.get('/manage/style.css', async (_req, reply) =>
     reply.type('text/css').send(await readFile('web/style.css', 'utf8')),
   );
+  const webRoot = resolve('dist/src/management/web');
+  app.get<{ Params: { '*': string } }>('/manage/web/*', async (req, reply) => {
+    const relative = req.params['*'];
+    if (!relative || !/^[A-Za-z0-9_./-]+\.js$/.test(relative) || relative.split('/').includes('..'))
+      return reply.code(404).send({ error: 'Not found' });
+    const path = resolve(webRoot, relative);
+    if (!path.startsWith(webRoot + sep)) return reply.code(404).send({ error: 'Not found' });
+    try {
+      return reply.type('application/javascript').send(await readFile(path, 'utf8'));
+    } catch {
+      return reply.code(404).send({ error: 'Not found' });
+    }
+  });
   app.post(
     '/management/login',
     { config: { rateLimit: { max: 5, timeWindow: '1 minute' } } },
@@ -253,6 +270,115 @@ export async function registerManagement(
     },
   );
   app.get('/management/config', async () => options.editor.read());
+  const configFile = z.enum(['accounts', 'banks', 'parsing']);
+  const patchSchema = z
+    .object({
+      file: configFile,
+      op: z.enum(['set', 'insert', 'delete', 'move']),
+      path: z
+        .array(z.union([z.string().min(1).max(200), z.number().int().min(0)]))
+        .min(1)
+        .max(12),
+      value: z.unknown().optional(),
+      from: z.number().int().min(0).optional(),
+      to: z.number().int().min(0).optional(),
+    })
+    .strict();
+  const structuredEdit = z
+    .object({
+      file: configFile,
+      revision: z.string().regex(/^[a-f0-9]{64}$/),
+      patches: z.array(patchSchema).min(1).max(2000),
+    })
+    .strict();
+  const structuredCandidate = async (
+    file: ConfigFile,
+    revision: string,
+    patches: ConfigPatch[],
+  ) => {
+    const current = await options.editor.read();
+    if (current.revision !== revision) throw new ConfigConflict();
+    return { current, text: applyConfigPatches(current, file, patches) };
+  };
+  app.get('/management/config/model', async () => {
+    const current = await options.editor.read();
+    const model = modelFromFiles(current);
+    const fallbackAccounts = options.runtime.config.accounts.map(({ id, name }) => ({ id, name }));
+    const fallbackCategories = options.runtime.config.expenseCategories ?? [];
+    const catalog = await Promise.all([
+      options.runtime.actual.accounts(),
+      options.runtime.actual.categories(),
+    ]).then(
+      ([actualAccounts, actualCategories]) => ({
+        accounts: actualAccounts,
+        categories: actualCategories,
+      }),
+      () => ({ accounts: fallbackAccounts, categories: fallbackCategories }),
+    );
+    return {
+      revision: current.revision,
+      activeRevision: current.activeRevision,
+      editable: current.editable,
+      editableFiles: current.editableFiles,
+      ...model,
+      catalog: {
+        accounts: [...new Map(catalog.accounts.map(account => [account.id, account])).values()],
+        categories: catalog.categories,
+      },
+    };
+  });
+  app.post('/management/config/model/preview', { bodyLimit: 512 * 1024 }, async req => {
+    const body = structuredEdit.parse(req.body);
+    const candidate = await structuredCandidate(body.file, body.revision, body.patches);
+    return options.editor.previewFile(body.file, candidate.text, body.revision);
+  });
+  app.post('/management/config/model/save', { bodyLimit: 512 * 1024 }, async req => {
+    const body = structuredEdit.extend({ confirmation: z.literal('SAVE') }).parse(req.body);
+    try {
+      const candidate = await structuredCandidate(body.file, body.revision, body.patches);
+      const result = await options.editor.saveFile(body.file, candidate.text, body.revision);
+      options.credentials.audit('config.save', 'success', result.revision);
+      await options.refresh?.();
+      return result;
+    } catch (error) {
+      options.credentials.audit('config.save', 'failed', body.revision);
+      throw error;
+    }
+  });
+  app.post(
+    '/management/config/test-message',
+    { bodyLimit: 256 * 1024, config: { rateLimit: { max: 60, timeWindow: '1 minute' } } },
+    async req => {
+      const body = z
+        .object({
+          sender: z.string().max(100).default(''),
+          message: z.string().min(1).max(20_000),
+          receivedAt: z.string().datetime({ offset: true }),
+          file: configFile.optional(),
+          revision: z
+            .string()
+            .regex(/^[a-f0-9]{64}$/)
+            .optional(),
+          patches: z.array(patchSchema).max(2000).optional(),
+        })
+        .strict()
+        .parse(req.body);
+      const current = await options.editor.read();
+      let files = current;
+      if (body.file) {
+        if (!body.revision || !body.patches || body.revision !== current.revision)
+          throw new ConfigConflict();
+        files = {
+          ...current,
+          [body.file]: applyConfigPatches(current, body.file, body.patches),
+        };
+      }
+      const parsed = parseConfigFiles(files);
+      return {
+        result: parseSms(body.message, body.receivedAt, parsed.banks, body.sender, parsed.parsing),
+      };
+    },
+  );
   const edit = z
     .object({
       accounts: z.string().min(1).max(200000),

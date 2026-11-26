@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readFile } from 'node:fs/promises';
 import { hash } from 'bcryptjs';
 import { runtimeFixture } from './fixtures/runtime.js';
 import { ConfigEditor } from '../src/config-editor.js';
@@ -464,6 +465,102 @@ describe('optional management authorization', () => {
     } finally {
       await headless.close();
     }
+  });
+  it('previews and saves structured account routing without YAML text', async () => {
+    const f = await managementFixture();
+    const cookie = sessionCookie(await f.login());
+    const headers = { cookie, origin };
+    const model = (
+      await f.app.inject({ url: '/management/config/model', headers: { cookie } })
+    ).json() as {
+      revision: string;
+      accounts: { accounts: unknown[] };
+      banks: { banks: unknown[] };
+      parsing: { templates: unknown[] };
+    };
+    expect(model.accounts.accounts).toHaveLength(1);
+    expect(model.banks.banks.length).toBeGreaterThan(0);
+    const patch = {
+      file: 'accounts',
+      revision: model.revision,
+      patches: [
+        {
+          file: 'accounts',
+          op: 'set',
+          path: ['accounts', 0, 'match', 'accountSuffixes'],
+          value: ['4321'],
+        },
+      ],
+    };
+    expect(
+      (
+        await f.app.inject({
+          method: 'POST',
+          url: '/management/config/model/preview',
+          headers,
+          payload: patch,
+        })
+      ).statusCode,
+    ).toBe(200);
+    const saved = await f.app.inject({
+      method: 'POST',
+      url: '/management/config/model/save',
+      headers,
+      payload: { ...patch, confirmation: 'SAVE' },
+    });
+    expect(saved.statusCode).toBe(200);
+    const text = await readFile(f.paths.accounts, 'utf8');
+    expect(text).toContain('4321');
+    expect(text).toContain('# Keep this comment');
+    expect(f.config.accounts[0]?.match.accountSuffixes).toEqual(['4321']);
+    expect(
+      (
+        await f.app.inject({
+          method: 'POST',
+          url: '/management/config/model/preview',
+          headers,
+          payload: patch,
+        })
+      ).statusCode,
+    ).toBe(409);
+  });
+  it('rejects disallowed structured configuration paths', async () => {
+    const { app, login } = await managementFixture();
+    const cookie = sessionCookie(await login());
+    const view = (
+      await app.inject({ url: '/management/config/model', headers: { cookie } })
+    ).json() as {
+      revision: string;
+    };
+    const response = await app.inject({
+      method: 'POST',
+      url: '/management/config/model/preview',
+      headers: { cookie, origin },
+      payload: {
+        file: 'accounts',
+        revision: view.revision,
+        patches: [{ file: 'accounts', op: 'set', path: ['unknown'], value: true }],
+      },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.body).toContain('not allowed');
+  });
+  it('tests a candidate message without queueing an event', async () => {
+    const { app, store, login } = await managementFixture();
+    const cookie = sessionCookie(await login());
+    const response = await app.inject({
+      method: 'POST',
+      url: '/management/config/test-message',
+      headers: { cookie, origin },
+      payload: {
+        sender: 'SAB',
+        message: 'Purchase at Example Cafe\nAmount: SAR 12.00\nCard: *1234',
+        receivedAt: '2026-08-22T10:10:30+03:00',
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(store.counts()).toEqual([]);
+    expect(response.json().result.type).toBe('transaction');
   });
   it('saves YAML only after explicit confirmation and validation', async () => {
     const { app, login, config } = await managementFixture();

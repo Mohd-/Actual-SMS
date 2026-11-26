@@ -30,6 +30,14 @@ const envSchema = z
       .enum(['0', '1'])
       .default('0')
       .transform(value => value === '1'),
+    MANAGEMENT_EDIT_BANKS: z
+      .enum(['0', '1'])
+      .default('0')
+      .transform(value => value === '1'),
+    MANAGEMENT_EDIT_PARSING: z
+      .enum(['0', '1'])
+      .default('0')
+      .transform(value => value === '1'),
     MANAGEMENT_URL: z
       .string()
       .url()
@@ -62,10 +70,13 @@ const envSchema = z
         message:
           'Management requires an origin, bcrypt password hash and independent 32-byte hex secret',
       });
-    if (env.MANAGEMENT_EDIT_ACCOUNTS && !env.MANAGEMENT_ENABLED)
+    if (
+      (env.MANAGEMENT_EDIT_ACCOUNTS || env.MANAGEMENT_EDIT_BANKS || env.MANAGEMENT_EDIT_PARSING) &&
+      !env.MANAGEMENT_ENABLED
+    )
       context.addIssue({
         code: 'custom',
-        message: 'Account editing requires management to be enabled',
+        message: 'Configuration editing requires management to be enabled',
       });
   });
 const fileSchema = z.object({

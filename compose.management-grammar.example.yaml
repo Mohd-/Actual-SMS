@@ -1,0 +1,14 @@
+# Optional bank/recognition editing, in addition to management and account editing.
+# Copy the bank and parsing files into the writable directory first:
+#   mkdir -p config/editable
+#   cp config/banks.yaml config/editable/banks.yaml
+#   cp config/parsing.yaml config/editable/parsing.yaml
+services:
+  actual-sms:
+    environment:
+      MANAGEMENT_EDIT_BANKS: '1'
+      MANAGEMENT_EDIT_PARSING: '1'
+      BANKS_CONFIG_PATH: /editable/banks.yaml
+      PARSING_CONFIG_PATH: /editable/parsing.yaml
+    volumes:
+      - ./config/editable:/editable:rw

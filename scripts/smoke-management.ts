@@ -29,7 +29,7 @@ const options = {
     },
     0.7,
   ),
-  editor: new ConfigEditor(f.runtime, true),
+  editor: new ConfigEditor(f.runtime, true, true, true),
   credentials,
   origin,
   passwordHash: await hash('browser-test-password', 4),
@@ -45,27 +45,103 @@ const app = buildServer({
 });
 let browser;
 try {
+  const initialParsing = await readFile(f.paths.parsing, 'utf8');
+  await writeFile(f.paths.parsing, initialParsing.replace(/^templates: \[\]\n/m, ''));
+  await f.runtime.reconnect();
+
   const { id } = store.enqueue({
     sender: 'SAB',
     message: '<script>globalThis.injected=true</script>',
     receivedAt: '2026-08-22T10:00:00Z',
   });
+  const { id: arabicId } = store.enqueue({
+    sender: 'SAB',
+    message: 'شراء\nالمبلغ: 12.00 SAR\nبطاقة: ***1234\nفي: 2026-08-22 10:10:30',
+    receivedAt: '2026-08-22T10:10:30Z',
+  });
   await app.listen({ host: '127.0.0.1', port: 43123 });
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
   const page = await browser.newPage({ timezoneId: 'Asia/Riyadh' });
+  page.setDefaultTimeout(12_000);
   const errors: string[] = [];
+  const externalRequests: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
+  page.on('request', request => {
+    const url = new URL(request.url());
+    if (url.origin !== origin) externalRequests.push(request.url());
+  });
   page.on('dialog', dialog => void dialog.accept());
+
+  const sheet = () => page.locator('dialog.sheet').last();
+  const closeSheet = async () => {
+    await sheet().getByRole('button', { name: 'Close' }).click();
+  };
+  const nav = async (name: string) => {
+    await page.getByRole('link', { name, exact: true }).click();
+  };
+  const confirm = async (name: string) => {
+    await page.getByRole('dialog').getByRole('button', { name, exact: true }).click();
+  };
+  const holdRequest = async (url: string) => {
+    let release!: () => void;
+    const held = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    await page.route(
+      url,
+      async route => {
+        await held;
+        await route.continue();
+      },
+      { times: 1 },
+    );
+    return release;
+  };
+  const reviewAndSave = async () => {
+    const preview = '**/management/config/model/preview';
+    const save = '**/management/config/model/save';
+    const releasePreview = await holdRequest(preview);
+    const releaseSave = await holdRequest(save);
+    const editor = page.locator('section.screen');
+    const previewRequested = page.waitForRequest(preview);
+    await page.getByRole('button', { name: 'Review changes' }).click();
+    await previewRequested;
+    await expect(editor).toHaveAttribute('inert', '');
+    const reload = editor.locator('button').filter({ hasText: 'Reload files' });
+    expect(
+      await reload.evaluate(button => {
+        button.focus();
+        return document.activeElement === button;
+      }),
+    ).toBe(false);
+    releasePreview();
+    const saveRequested = page.waitForRequest(save);
+    await confirm('Save and activate');
+    await saveRequested;
+    await expect(editor).toHaveAttribute('inert', '');
+    releaseSave();
+    await expect(editor).not.toHaveAttribute('inert', '');
+  };
+
   await page.goto(origin + '/manage');
   await page.getByLabel('Management password').fill('browser-test-password');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  await expect(page.locator('#status-data')).toContainText('"ready": true');
-  await page.getByRole('button', { name: 'SMS audit', exact: true }).click();
-  await page.getByRole('button', { name: new RegExp(id) }).click();
-  await expect(page.locator('#event-detail')).toContainText(
-    '<script>globalThis.injected=true</script>',
-  );
+  await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible();
+  await expect(page.getByText('Imports are running')).toBeVisible();
+
+  await nav('SMS audit');
+  await expect(page.getByRole('heading', { name: 'SMS audit' })).toBeVisible();
+  await expect(page.locator('body')).not.toContainText('<script>globalThis.injected=true</script>');
+  await page.getByRole('button', { name: `Open event ${id}` }).click();
+  await expect(sheet()).toContainText('<script>globalThis.injected=true</script>');
+  await expect(sheet()).toContainText('Original input');
   expect(await page.evaluate(() => Object.hasOwn(globalThis, 'injected'))).toBe(false);
+  await closeSheet();
+
+  await page.getByRole('button', { name: `Open event ${arabicId}` }).click();
+  await expect(sheet().locator('[dir="rtl"]').first()).toBeVisible();
+  await closeSheet();
+
   f.config.eligibleCategories = [{ id: 'food', name: 'Food' }];
   store.db.exec(`
     CREATE TABLE merchant_assignment_reviews (accountId TEXT, merchant TEXT, payee TEXT, categoryId TEXT, status TEXT, sourceRef TEXT);
@@ -76,6 +152,7 @@ try {
     payees: [
       { id: 'cafe', name: 'Cafe Central' },
       { id: 'other-cafe', name: 'Another Cafe' },
+      { id: 'arabic', name: 'متجر-الرياض' },
     ],
     categories: [...f.config.eligibleCategories, { id: 'other', name: 'Other' }],
     tags: [{ id: 'work', name: 'work' }],
@@ -83,180 +160,210 @@ try {
   const mainCafe = store.payees.list('cafe central', 0, 1)[0]!;
   store.payees.save(mainCafe.id, mainCafe.revision, null, []);
   store.payees.defaults('Example Cafe');
-  await page.getByRole('button', { name: 'Payees', exact: true }).click();
-  await page.getByRole('button', { name: 'Example Cafe · No category', exact: true }).click();
-  await expect(page.locator('#payee-suggestion')).toContainText('Food · Coffee shop');
-  await page.getByRole('button', { name: 'Use suggestion', exact: true }).click();
-  expect(store.payees.list('example cafe', 0, 1)[0]?.categoryId).toBeNull();
-  await page.getByRole('button', { name: 'Save defaults', exact: true }).click();
-  await expect(
-    page.getByRole('button', { name: 'Example Cafe · Food', exact: true }),
-  ).toBeVisible();
-  await page.getByLabel('Actual category').selectOption('');
-  await page.getByLabel('#work').check();
-  await page.getByRole('button', { name: 'Save defaults', exact: true }).click();
-  await expect(
-    page.getByRole('button', { name: 'Example Cafe · No category · #work', exact: true }),
-  ).toBeVisible();
-  const cafe = store.payees.list('cafe central', 0, 1)[0]!;
-  await page.getByLabel('Link to').selectOption(cafe.id);
-  await expect(page.locator('#payee-link-preview')).toContainText('Cafe Central');
-  await page.getByRole('button', { name: 'Link', exact: true }).click();
-  await expect(
-    page.getByRole('button', { name: 'Cafe Central · No category · #work', exact: true }),
-  ).toBeVisible();
-  await page.getByRole('button', { name: 'Use as separate payee', exact: true }).click();
-  await expect(
-    page.getByRole('button', { name: 'Example Cafe · No category', exact: true }),
-  ).toBeVisible();
-  await page.getByRole('button', { name: /split descriptor.*Migration conflict/ }).click();
-  await expect(page.locator('#payee-state')).toContainText('Another Cafe');
-  await expect(page.locator('#payee-state')).toContainText('Cafe Central');
-  await page.getByLabel('#work').check();
-  await page.getByRole('button', { name: 'Save defaults', exact: true }).click();
-  await expect(
-    page.getByRole('button', { name: /split descriptor.*#work.*Migration conflict/ }),
-  ).toBeVisible();
-  await page.getByLabel('Actual category').selectOption({ label: 'Leave uncategorized' });
-  await page.getByRole('button', { name: 'Save defaults', exact: true }).click();
-  await expect(
-    page.getByRole('button', { name: 'split descriptor · No category · #work', exact: true }),
-  ).toBeVisible();
-  await page.getByRole('button', { name: 'Configuration', exact: true }).click();
-  const accounts = page.getByLabel('Account routing YAML');
-  await expect(accounts).toHaveValue(/1234/);
-  const initialAccounts = await accounts.inputValue();
-  let releasePreview!: () => void, previewReached!: () => void;
-  const previewBlocked = new Promise<void>(resolve => {
-    releasePreview = resolve;
-  });
-  const previewStarted = new Promise<void>(resolve => {
-    previewReached = resolve;
-  });
-  await page.route('**/management/config/preview', async route => {
-    const response = await route.fetch();
-    previewReached();
-    await previewBlocked;
-    await route.fulfill({ response });
-  });
-  await accounts.fill(initialAccounts.replace('1234', '5678'));
-  await page.locator('#preview').click();
-  await previewStarted;
-  await accounts.fill(initialAccounts.replace('1234', '6789'));
-  releasePreview();
-  await expect(page.locator('#preview')).toBeEnabled();
-  await expect(page.locator('#diff')).toBeHidden();
-  await page.locator('#confirm-save').check();
-  await expect(page.locator('#save')).toBeDisabled();
-  await page.unroute('**/management/config/preview');
-  // A disk reload also invalidates an in-flight preview, even at the same revision.
-  let releaseReloadPreview!: () => void, reloadPreviewReached!: () => void;
-  const reloadPreviewBlocked = new Promise<void>(resolve => {
-    releaseReloadPreview = resolve;
-  });
-  const reloadPreviewStarted = new Promise<void>(resolve => {
-    reloadPreviewReached = resolve;
-  });
-  await page.route('**/management/config/preview', async route => {
-    const response = await route.fetch();
-    reloadPreviewReached();
-    await reloadPreviewBlocked;
-    await route.fulfill({ response });
-  });
-  await page.locator('#preview').click();
-  await reloadPreviewStarted;
-  await page.locator('#config-load').click();
-  await expect(accounts).toHaveValue(initialAccounts);
-  releaseReloadPreview();
-  await expect(page.locator('#preview')).toBeEnabled();
-  await expect(page.locator('#diff')).toBeHidden();
-  await expect(page.locator('#confirm-save')).not.toBeChecked();
-  await page.unroute('**/management/config/preview');
-  await accounts.fill(
-    (await accounts.inputValue()).replace('1234', '4321') + '# Browser-preserved comment\n',
+
+  await nav('Payees');
+  await expect(page.getByRole('heading', { name: 'Payees' })).toBeVisible();
+  await page.getByLabel('Search payees').fill('Example Cafe');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await page.getByRole('button', { name: 'Example Cafe', exact: true }).click();
+  await expect(sheet()).toContainText('Example Cafe');
+  await sheet().getByRole('button', { name: 'Suggest category' }).click();
+  await expect(sheet()).toContainText('Food · 91%');
+  await sheet().getByRole('button', { name: 'Use suggestion' }).click();
+  await sheet().getByRole('button', { name: 'Save defaults' }).click();
+  await expect(page.getByLabel('Category for Example Cafe')).toHaveValue('food');
+
+  await page.getByRole('button', { name: 'Example Cafe', exact: true }).click();
+  await sheet().getByLabel('#work').check();
+  await sheet().getByRole('button', { name: 'Save defaults' }).click();
+  await expect(page.locator('tr', { hasText: 'Example Cafe' })).toContainText('#work');
+
+  await page.getByLabel('Search payees').fill('');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await page.getByRole('button', { name: 'Example Cafe', exact: true }).click();
+  await sheet().getByRole('button', { name: 'Link' }).first().click();
+  const linkSheet = page.locator('dialog.sheet').last();
+  await linkSheet.getByLabel('Target payee').fill('Cafe Central');
+  await linkSheet.getByRole('option', { name: 'Cafe Central' }).click();
+  await linkSheet.getByRole('button', { name: 'Link descriptor' }).click();
+  await expect(page.locator('tr', { hasText: 'Cafe Central' })).toContainText('#work');
+
+  await page.getByRole('button', { name: 'Cafe Central', exact: true }).click();
+  await sheet().getByRole('button', { name: 'Use as separate payee' }).first().click();
+  await confirm('Separate descriptor');
+  await expect(page.getByLabel('Category for Example Cafe')).toHaveValue('');
+
+  await page.getByLabel('Search payees').fill('split descriptor');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await page.getByRole('button', { name: 'split descriptor', exact: true }).click();
+  await expect(sheet()).toContainText('Another Cafe');
+  await expect(sheet()).toContainText('Cafe Central');
+  await sheet().getByLabel('#work').check();
+  await sheet().getByRole('button', { name: 'Save defaults' }).click();
+  await page.getByRole('button', { name: 'split descriptor', exact: true }).click();
+  await sheet().getByLabel('Actual category').click();
+  await page.getByRole('option', { name: 'Leave uncategorized' }).click();
+  await sheet().getByRole('button', { name: 'Save defaults' }).click();
+  await expect(page.locator('tr', { hasText: 'split descriptor' })).not.toContainText(
+    'Migration conflict',
   );
-  await page.getByRole('button', { name: 'Validate and preview changes', exact: true }).click();
-  await expect(page.locator('#after')).toContainText('4321');
-  await page.getByLabel('I reviewed the changes').check();
-  const candidate = await accounts.inputValue();
-  await accounts.fill(candidate + '# Another edit\n');
-  await expect(page.locator('#confirm-save')).not.toBeChecked();
-  await expect(page.locator('#save')).toBeDisabled();
-  await accounts.fill(candidate);
-  await page.locator('#preview').click();
-  await expect(page.locator('#diff')).toBeVisible();
-  await page.locator('#confirm-save').check();
-  const external = initialAccounts + '# External revision\n';
-  await writeFile(f.paths.accounts, external);
-  await page.locator('#save').click();
-  await expect(page.locator('#error')).toContainText('Configuration changed');
-  expect(await readFile(f.paths.accounts, 'utf8')).toBe(external);
-  expect(f.config.accounts[0]?.match.accountSuffixes).toEqual(['1234']);
-  await page.locator('#config-load').click();
-  await expect(accounts).toHaveValue(external);
-  await accounts.fill(candidate);
-  await page.locator('#preview').click();
-  await expect(page.locator('#diff')).toBeVisible();
-  await page.locator('#confirm-save').check();
-  let releaseSave!: () => void, saveReached!: () => void;
-  const saveBlocked = new Promise<void>(resolve => {
-    releaseSave = resolve;
-  });
-  const saveStarted = new Promise<void>(resolve => {
-    saveReached = resolve;
-  });
-  await page.route('**/management/config/save', async route => {
-    const response = await route.fetch();
-    saveReached();
-    await saveBlocked;
-    await route.fulfill({ response });
-  });
-  await page.getByRole('button', { name: 'Save and activate YAML', exact: true }).click();
-  await saveStarted;
-  await expect(accounts).toHaveAttribute('readonly', '');
-  await expect(page.locator('#config-load')).toBeDisabled();
-  await expect(page.locator('#config-reload')).toBeDisabled();
-  await expect(page.locator('[data-page="config"]')).toBeDisabled();
-  releaseSave();
-  await expect(page.locator('#config-load')).toBeEnabled();
-  await expect(accounts).not.toHaveAttribute('readonly', '');
-  await expect(page.locator('#diff')).toBeHidden();
-  await page.unroute('**/management/config/save');
-  expect(await readFile(f.paths.accounts, 'utf8')).toBe(candidate);
-  expect(await readFile(f.paths.accounts, 'utf8')).toContain('# Browser-preserved comment');
+
+  await page.getByLabel('Search payees').fill('متجر');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'متجر-الرياض', exact: true })).toBeVisible();
+
+  await nav('Routing');
+  await expect(page.getByRole('heading', { name: 'Routing' })).toBeVisible();
+  const initialAccounts = await readFile(f.paths.accounts, 'utf8');
+  const suffix = page.getByLabel('Account suffixes').first();
+  await page.getByRole('button', { name: 'Remove 1234' }).click();
+  await suffix.fill('4321');
+  await suffix.press('Enter');
+  await reviewAndSave();
+  await expect(page.getByText('Routing configuration saved and activated')).toBeVisible();
+  expect(await readFile(f.paths.accounts, 'utf8')).toContain('4321');
+  expect(await readFile(f.paths.accounts, 'utf8')).toContain('# Keep this comment');
   expect(f.config.accounts[0]?.match.accountSuffixes).toEqual(['4321']);
-  // Read-only deployment behavior uses the same application, without another config store.
-  options.editor = new ConfigEditor(f.runtime, false);
-  await page.getByRole('button', { name: 'Reload files from disk', exact: true }).click();
-  await expect(accounts).toHaveAttribute('readonly', '');
-  await expect(
-    page.getByRole('button', { name: 'Validate and preview changes', exact: true }),
-  ).toBeDisabled();
-  await page.getByRole('button', { name: 'Tasker', exact: true }).click();
-  await expect(page.locator('#checkpoint-state')).toContainText('Not initialized');
-  expect(store.inboxCheckpoint()).toBeUndefined();
+  const activeBeforeReload = f.runtime.status().activeRevision;
+  const savedAccounts = await readFile(f.paths.accounts, 'utf8');
+  await writeFile(f.paths.accounts, savedAccounts.replace('4321', '8765'));
+  await page.getByRole('button', { name: 'Reload files', exact: true }).click();
+  await expect(page.getByText('Not active', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Remove 8765' })).toBeVisible();
+  expect(f.runtime.status().activeRevision).toBe(activeBeforeReload);
+  await page.getByRole('button', { name: 'Validate and activate disk configuration' }).click();
+  await confirm('Validate and activate');
+  await expect(page.getByText('Disk configuration validated and activated')).toBeVisible();
+  await expect(page.getByText('In sync', { exact: true })).toBeVisible();
+  expect(f.runtime.status().activeRevision).not.toBe(activeBeforeReload);
+  expect(f.config.accounts[0]?.match.accountSuffixes).toEqual(['8765']);
+
+  await nav('Banks');
+  await expect(page.getByRole('heading', { name: 'Banks' })).toBeVisible();
+  await expect(page.getByText('No parsing templates are defined.').first()).toBeVisible();
+  await page.getByLabel('Bank name').first().fill('SAB Bank');
+  await reviewAndSave();
+  await expect(page.getByText('Bank configuration saved and activated')).toBeVisible();
+  expect(await readFile(f.paths.banks, 'utf8')).toContain('SAB Bank');
+
+  await nav('Recognition');
+  await expect(page.getByRole('heading', { name: 'Recognition' })).toBeVisible();
+  const ignoredCard = page.locator('.card', { hasText: 'Ignored messages' });
+  await ignoredCard.getByRole('button', { name: 'Add rule' }).click();
+  await page.getByLabel('ignored pattern source 1').last().fill('zzz-never-match');
+  await page.getByRole('button', { name: 'Add template', exact: true }).click();
+  await page.getByLabel('Template ID').fill('sample-purchase');
+  await page.getByLabel('template match pattern source 1').fill('Purchase notification');
+  await reviewAndSave();
+  await expect(page.getByText('Recognition configuration saved and activated')).toBeVisible();
+  expect(await readFile(f.paths.parsing, 'utf8')).toContain('zzz-never-match');
+  expect(f.config.parsing.templates.map(template => template.id)).toEqual(['sample-purchase']);
+  await page.getByLabel('Sender').fill('SAB');
   await page
-    .getByRole('button', { name: 'Generate / replace restricted key', exact: true })
-    .click();
-  await expect(page.getByLabel('Restricted key', { exact: true })).not.toHaveValue('');
+    .getByLabel('Sample SMS')
+    .fill('Purchase at Example Cafe\nAmount: SAR 12.00\nCard: *1234');
+  await page.getByRole('button', { name: 'Test message' }).click();
+  await expect(page.getByText('Recognized as a transaction')).toBeVisible();
+
+  await nav('Phone setup');
+  await expect(page.getByRole('heading', { name: 'Phone setup' })).toBeVisible();
+  await expect(page.getByText('Not initialized', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Generate / replace key' }).click();
+  await confirm('Replace key');
+  const secretDialog = page.getByRole('dialog');
+  await expect(secretDialog.getByLabel('Restricted key')).not.toHaveValue('');
+  await secretDialog.getByRole('button', { name: 'I have saved the key' }).click();
   await page.getByLabel('Public HTTPS service origin').fill('https://sms.example.test');
   const downloading = page.waitForEvent('download');
-  await page
-    .getByRole('button', { name: 'Download configured Tasker project', exact: true })
-    .click();
+  await page.getByRole('button', { name: 'Download configured project' }).click();
   const download = await downloading;
   expect(download.suggestedFilename()).toBe('Actual_SMS_Inbox.prj.xml');
   expect(store.inboxCheckpoint()).toBeUndefined();
+  await page.getByRole('button', { name: 'Choose a starting point' }).click();
   await page.getByLabel('Start at device-local time').fill('2026-01-01T09:30:00');
-  await page.getByRole('button', { name: 'Confirm checkpoint change', exact: true }).click();
-  await expect(page.locator('#checkpoint-state')).toContainText('2026-01-01T06:30:00.000Z');
+  await page.getByRole('button', { name: 'Confirm checkpoint change' }).click();
+  await expect(page.getByText('2026-01-01T06:30:00.000Z')).toBeVisible();
+  expect(store.inboxCheckpoint()).toEqual({ date: 1767249000000, rowId: 0 });
+
   await page.setViewportSize({ width: 390, height: 844 });
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await page.getByRole('button', { name: 'Sign out', exact: true }).click();
+  for (const route of [
+    '#/status',
+    '#/events',
+    '#/payees',
+    '#/config/accounts',
+    '#/config/banks',
+    '#/config/parsing',
+    '#/tasker',
+  ]) {
+    await page.evaluate(value => {
+      location.hash = value;
+    }, route);
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+  }
+  await page.getByRole('button', { name: 'Open navigation' }).click();
+  await expect(page.getByRole('navigation', { name: 'Mobile management sections' })).toBeVisible();
+  await page.getByRole('button', { name: 'Close navigation' }).click();
+  await page.setViewportSize({ width: 320, height: 568 });
+  for (const route of ['#/payees', '#/config/accounts', '#/events']) {
+    await page.evaluate(value => {
+      location.hash = value;
+    }, route);
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+  }
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  options.editor = new ConfigEditor(f.runtime, false);
+  await nav('Routing');
+  await expect(page.getByText('Account editing is disabled', { exact: false })).toBeVisible();
+  await nav('SMS audit');
+  const detailUrl = origin + '/management/events/' + id;
+  let releaseDetail!: () => void;
+  const heldDetail = new Promise<void>(resolve => {
+    releaseDetail = resolve;
+  });
+  let detailFetched!: () => void;
+  const fetchedDetail = new Promise<void>(resolve => {
+    detailFetched = resolve;
+  });
+  let detailReleased!: () => void;
+  const releasedDetail = new Promise<void>(resolve => {
+    detailReleased = resolve;
+  });
+  await page.route(
+    detailUrl,
+    async route => {
+      const response = await route.fetch();
+      detailFetched();
+      await heldDetail;
+      await route.fulfill({ response }).catch(() => {});
+      detailReleased();
+    },
+    { times: 1 },
+  );
+  await page.getByRole('button', { name: `Open event ${id}` }).click();
+  await fetchedDetail;
+  const cancelledDetail = page.waitForEvent(
+    'requestfailed',
+    request => request.url() === detailUrl,
+  );
+  await page.getByRole('button', { name: 'Sign out', exact: true }).first().click();
   await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+  await cancelledDetail;
+  releaseDetail();
+  await releasedDetail;
+  await expect(sheet()).toHaveCount(0);
+  await expect(page.locator('body')).not.toContainText('<script>globalThis.injected=true</script>');
   expect(errors).toEqual([]);
+  expect(externalRequests).toEqual([]);
+  expect(initialAccounts).toContain('# Keep this comment');
   console.log(
-    'Management browser smoke passed: login, safe audit, payee defaults and descriptor links, stale-preview races, confirmation invalidation, YAML conflict/save locking/read-only mode, Tasker export, checkpoint/time zone, mobile layout, logout.',
+    'Management browser smoke passed: overview, private audit/detail, RTL message, payee inline/defaults/linking/conflicts, structured routing and bank saves, grammar save/tester, read-only fallback, guided Tasker export/checkpoint, mobile layouts, logout.',
   );
 } finally {
   await browser?.close();

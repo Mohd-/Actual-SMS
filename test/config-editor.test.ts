@@ -106,3 +106,56 @@ describe('YAML account editing', () => {
     }
   });
 });
+
+describe('structured bank and parsing editing', () => {
+  it('saves and activates bank changes with a recovery copy', async () => {
+    const f = await runtimeFixture();
+    try {
+      const editor = new ConfigEditor(f.runtime, false, true, false);
+      const initial = await editor.read();
+      expect(initial.editableFiles.banks).toBe(true);
+      const text = initial.banks.replace('name: SAB', 'name: SAB Bank');
+      await editor.saveFile('banks', text, initial.revision);
+      expect(await readFile(f.paths.banks, 'utf8')).toBe(text);
+      expect(f.config.banks[0]?.name).toBe('SAB Bank');
+      expect(await readFile(f.paths.banks + '.previous', 'utf8')).toBe(initial.banks);
+      await expect(editor.saveFile('parsing', initial.parsing, initial.revision)).rejects.toThrow(
+        'read-only',
+      );
+    } finally {
+      await f.cleanup();
+    }
+  });
+  it('saves and activates parsing changes while preserving comments', async () => {
+    const f = await runtimeFixture();
+    try {
+      const editor = new ConfigEditor(f.runtime, false, false, true);
+      const initial = await editor.read();
+      const text = `${initial.parsing}\n# Operator note\n`;
+      await editor.saveFile('parsing', text, initial.revision);
+      expect(await readFile(f.paths.parsing, 'utf8')).toBe(text);
+      expect(f.runtime.status().activeRevision).toBe((await editor.read()).revision);
+      expect(await readFile(f.paths.parsing + '.previous', 'utf8')).toBe(initial.parsing);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  it('rejects a stale structured save without touching the file', async () => {
+    const f = await runtimeFixture();
+    try {
+      const editor = new ConfigEditor(f.runtime, false, true, true);
+      const initial = await editor.read();
+      await writeFile(f.paths.banks, `${initial.banks}\n# External edit\n`);
+      await expect(
+        editor.saveFile(
+          'banks',
+          initial.banks.replace('name: SAB', 'name: SAB 2'),
+          initial.revision,
+        ),
+      ).rejects.toThrow('changed');
+      expect(await readFile(f.paths.banks, 'utf8')).toContain('# External edit');
+    } finally {
+      await f.cleanup();
+    }
+  });
+});
