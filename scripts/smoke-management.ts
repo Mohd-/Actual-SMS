@@ -1,7 +1,7 @@
 /** Isolated browser verification: temporary YAML, in-memory SQLite, fake Actual. */
 import { chromium, expect } from '@playwright/test';
 import { hash } from 'bcryptjs';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { runtimeFixture } from '../test/fixtures/runtime.js';
 import { EventStore } from '../src/db.js';
 import { ConfigEditor } from '../src/config-editor.js';
@@ -45,6 +45,10 @@ const app = buildServer({
 });
 let browser;
 try {
+  const initialParsing = await readFile(f.paths.parsing, 'utf8');
+  await writeFile(f.paths.parsing, initialParsing.replace(/^templates: \[\]\n/m, ''));
+  await f.runtime.reconnect();
+
   const { id } = store.enqueue({
     sender: 'SAB',
     message: '<script>globalThis.injected=true</script>',
@@ -77,6 +81,46 @@ try {
   };
   const confirm = async (name: string) => {
     await page.getByRole('dialog').getByRole('button', { name, exact: true }).click();
+  };
+  const holdRequest = async (url: string) => {
+    let release!: () => void;
+    const held = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    await page.route(
+      url,
+      async route => {
+        await held;
+        await route.continue();
+      },
+      { times: 1 },
+    );
+    return release;
+  };
+  const reviewAndSave = async () => {
+    const preview = '**/management/config/model/preview';
+    const save = '**/management/config/model/save';
+    const releasePreview = await holdRequest(preview);
+    const releaseSave = await holdRequest(save);
+    const editor = page.locator('section.screen');
+    const previewRequested = page.waitForRequest(preview);
+    await page.getByRole('button', { name: 'Review changes' }).click();
+    await previewRequested;
+    await expect(editor).toHaveAttribute('inert', '');
+    const reload = editor.locator('button').filter({ hasText: 'Reload files' });
+    expect(
+      await reload.evaluate(button => {
+        button.focus();
+        return document.activeElement === button;
+      }),
+    ).toBe(false);
+    releasePreview();
+    const saveRequested = page.waitForRequest(save);
+    await confirm('Save and activate');
+    await saveRequested;
+    await expect(editor).toHaveAttribute('inert', '');
+    releaseSave();
+    await expect(editor).not.toHaveAttribute('inert', '');
   };
 
   await page.goto(origin + '/manage');
@@ -175,18 +219,30 @@ try {
   await page.getByRole('button', { name: 'Remove 1234' }).click();
   await suffix.fill('4321');
   await suffix.press('Enter');
-  await page.getByRole('button', { name: 'Review changes' }).click();
-  await confirm('Save and activate');
+  await reviewAndSave();
   await expect(page.getByText('Routing configuration saved and activated')).toBeVisible();
   expect(await readFile(f.paths.accounts, 'utf8')).toContain('4321');
   expect(await readFile(f.paths.accounts, 'utf8')).toContain('# Keep this comment');
   expect(f.config.accounts[0]?.match.accountSuffixes).toEqual(['4321']);
+  const activeBeforeReload = f.runtime.status().activeRevision;
+  const savedAccounts = await readFile(f.paths.accounts, 'utf8');
+  await writeFile(f.paths.accounts, savedAccounts.replace('4321', '8765'));
+  await page.getByRole('button', { name: 'Reload files', exact: true }).click();
+  await expect(page.getByText('Not active', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Remove 8765' })).toBeVisible();
+  expect(f.runtime.status().activeRevision).toBe(activeBeforeReload);
+  await page.getByRole('button', { name: 'Validate and activate disk configuration' }).click();
+  await confirm('Validate and activate');
+  await expect(page.getByText('Disk configuration validated and activated')).toBeVisible();
+  await expect(page.getByText('In sync', { exact: true })).toBeVisible();
+  expect(f.runtime.status().activeRevision).not.toBe(activeBeforeReload);
+  expect(f.config.accounts[0]?.match.accountSuffixes).toEqual(['8765']);
 
   await nav('Banks');
   await expect(page.getByRole('heading', { name: 'Banks' })).toBeVisible();
+  await expect(page.getByText('No parsing templates are defined.').first()).toBeVisible();
   await page.getByLabel('Bank name').first().fill('SAB Bank');
-  await page.getByRole('button', { name: 'Review changes' }).click();
-  await confirm('Save and activate');
+  await reviewAndSave();
   await expect(page.getByText('Bank configuration saved and activated')).toBeVisible();
   expect(await readFile(f.paths.banks, 'utf8')).toContain('SAB Bank');
 
@@ -195,10 +251,13 @@ try {
   const ignoredCard = page.locator('.card', { hasText: 'Ignored messages' });
   await ignoredCard.getByRole('button', { name: 'Add rule' }).click();
   await page.getByLabel('ignored pattern source 1').last().fill('zzz-never-match');
-  await page.getByRole('button', { name: 'Review changes' }).click();
-  await confirm('Save and activate');
+  await page.getByRole('button', { name: 'Add template', exact: true }).click();
+  await page.getByLabel('Template ID').fill('sample-purchase');
+  await page.getByLabel('template match pattern source 1').fill('Purchase notification');
+  await reviewAndSave();
   await expect(page.getByText('Recognition configuration saved and activated')).toBeVisible();
   expect(await readFile(f.paths.parsing, 'utf8')).toContain('zzz-never-match');
+  expect(f.config.parsing.templates.map(template => template.id)).toEqual(['sample-purchase']);
   await page.getByLabel('Sender').fill('SAB');
   await page
     .getByLabel('Sample SMS')
@@ -262,9 +321,44 @@ try {
   options.editor = new ConfigEditor(f.runtime, false);
   await nav('Routing');
   await expect(page.getByText('Account editing is disabled', { exact: false })).toBeVisible();
-  await nav('Overview');
+  await nav('SMS audit');
+  const detailUrl = origin + '/management/events/' + id;
+  let releaseDetail!: () => void;
+  const heldDetail = new Promise<void>(resolve => {
+    releaseDetail = resolve;
+  });
+  let detailFetched!: () => void;
+  const fetchedDetail = new Promise<void>(resolve => {
+    detailFetched = resolve;
+  });
+  let detailReleased!: () => void;
+  const releasedDetail = new Promise<void>(resolve => {
+    detailReleased = resolve;
+  });
+  await page.route(
+    detailUrl,
+    async route => {
+      const response = await route.fetch();
+      detailFetched();
+      await heldDetail;
+      await route.fulfill({ response }).catch(() => {});
+      detailReleased();
+    },
+    { times: 1 },
+  );
+  await page.getByRole('button', { name: `Open event ${id}` }).click();
+  await fetchedDetail;
+  const cancelledDetail = page.waitForEvent(
+    'requestfailed',
+    request => request.url() === detailUrl,
+  );
   await page.getByRole('button', { name: 'Sign out', exact: true }).first().click();
   await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+  await cancelledDetail;
+  releaseDetail();
+  await releasedDetail;
+  await expect(sheet()).toHaveCount(0);
+  await expect(page.locator('body')).not.toContainText('<script>globalThis.injected=true</script>');
   expect(errors).toEqual([]);
   expect(externalRequests).toEqual([]);
   expect(initialAccounts).toContain('# Keep this comment');

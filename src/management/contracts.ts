@@ -43,7 +43,7 @@ export interface ParsingFileView {
     kinds: ParsingRuleView<string>[];
     fields: Record<string, PatternView[]>;
   };
-  templates: {
+  templates?: {
     id: string;
     match: PatternView[];
     kind: string;

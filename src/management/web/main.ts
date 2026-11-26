@@ -55,6 +55,7 @@ function setDocumentTitle(route: Route) {
 
 function showLogin(message?: string) {
   signedIn = false;
+  routeGeneration++;
   setDirtyGuard();
   cleanup?.();
   cleanup = undefined;

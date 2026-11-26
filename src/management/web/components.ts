@@ -290,6 +290,7 @@ export function confirmDialog(options: ConfirmOptions) {
       event.preventDefault();
       finish(false);
     });
+    dialog.addEventListener('close', () => finish(false));
     dialog.addEventListener('click', event => {
       if (event.target === dialog) finish(false);
     });

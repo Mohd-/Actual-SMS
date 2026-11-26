@@ -79,9 +79,10 @@ function updateHash(filters: Filters) {
   if (location.hash !== hash) history.replaceState(null, '', hash);
 }
 
-export async function renderEvents(host: HTMLElement, initialQuery = new URLSearchParams()) {
+export function renderEvents(host: HTMLElement, initialQuery = new URLSearchParams()) {
   const screen = el('section', { class: 'screen' });
   host.append(screen);
+  const requests = new AbortController();
   let filters = filtersFrom(initialQuery);
   let cursorStack: (string | undefined)[] = [undefined];
   let pageIndex = 0;
@@ -326,7 +327,7 @@ export async function renderEvents(host: HTMLElement, initialQuery = new URLSear
     const cursor = cursorStack[index];
     if (cursor) query.set('cursor', cursor);
     try {
-      const result = await api<EventPage>(`events?${query}`);
+      const result = await api<EventPage>(`events?${query}`, undefined, requests.signal);
       if (current !== generation) return;
       page = result;
       if (result.nextCursor) cursorStack[index + 1] = result.nextCursor;
@@ -346,7 +347,12 @@ export async function renderEvents(host: HTMLElement, initialQuery = new URLSear
 
   async function openDetail(eventId: string) {
     try {
-      const detail = await api<EventView>(`events/${encodeURIComponent(eventId)}`);
+      const detail = await api<EventView>(
+        `events/${encodeURIComponent(eventId)}`,
+        undefined,
+        requests.signal,
+      );
+      if (requests.signal.aborted || !screen.isConnected) return;
       const input = (detail.input ?? {}) as EventInput;
       const parsed = detail.parsed as ParsedView | undefined;
       const content = el('div', { class: 'detail-stack' });
@@ -502,14 +508,16 @@ export async function renderEvents(host: HTMLElement, initialQuery = new URLSear
         wide: true,
       });
     } catch (caught) {
+      if (requests.signal.aborted || !screen.isConnected) return;
       toast(caught instanceof Error ? caught.message : 'Could not load message', 'danger');
     }
   }
 
   renderList();
   renderPagination();
-  await load(0);
+  void load(0);
   return () => {
     generation++;
+    requests.abort();
   };
 }

@@ -1,4 +1,10 @@
-import type { AccountsFileView, BanksFileView, ConfigPatch, PayeePage } from '../contracts.js';
+import type {
+  AccountsFileView,
+  BanksFileView,
+  ConfigPatch,
+  ParsingFileView,
+  PayeePage,
+} from '../contracts.js';
 import type { BankConfig, TxKind } from '../../types.js';
 import type { PayeeView } from '../../payees.js';
 import { categoryDisplayName } from './format.js';
@@ -333,22 +339,7 @@ function plainPatterns(patterns: PatternDraft[]) {
 }
 
 export function parsingFromConfig(
-  file:
-    | {
-        shared: {
-          ignored: { value: string; patterns: { source: string; flags: string }[] }[];
-          kinds: { value: string; patterns: { source: string; flags: string }[] }[];
-          fields: Record<string, { source: string; flags: string }[]>;
-        };
-        templates: {
-          id: string;
-          kind: string;
-          required: string[];
-          match: { source: string; flags: string }[];
-          fields: Record<string, { source: string; flags: string }[]>;
-        }[];
-      }
-    | undefined,
+  file: Pick<ParsingFileView, 'shared' | 'templates'> | undefined,
 ): ParsingDraft {
   return {
     ignored: (file?.shared.ignored ?? []).map((rule, index) => ({
@@ -454,22 +445,7 @@ function planParsingRuleList(
 }
 
 export function planParsingPatches(
-  original:
-    | {
-        shared: {
-          ignored: { value: string; patterns: { source: string; flags: string }[] }[];
-          kinds: { value: string; patterns: { source: string; flags: string }[] }[];
-          fields: Record<string, { source: string; flags: string }[]>;
-        };
-        templates: {
-          id: string;
-          kind: string;
-          required: string[];
-          match: { source: string; flags: string }[];
-          fields: Record<string, { source: string; flags: string }[]>;
-        }[];
-      }
-    | undefined,
+  original: Pick<ParsingFileView, 'shared' | 'templates'> | undefined,
   draft: ParsingDraft,
 ): PatchPlan {
   const patches: ConfigPatch[] = [];

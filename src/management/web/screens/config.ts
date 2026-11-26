@@ -103,6 +103,7 @@ function sourceDisclosure(file: 'accounts' | 'banks' | 'parsing') {
 }
 
 async function reviewPlan(
+  screen: HTMLElement,
   file: 'accounts' | 'banks' | 'parsing',
   plan: PatchPlan,
   model: ConfigModelView,
@@ -116,6 +117,7 @@ async function reviewPlan(
     revision: model.revision,
     patches: plan.patches,
   });
+  if (!screen.isConnected) return false;
   const list = el(
     'ul',
     { class: 'plain-list' },
@@ -138,7 +140,7 @@ async function reviewPlan(
     ),
     confirmLabel: 'Save and activate',
   });
-  if (!confirmed) return false;
+  if (!confirmed || !screen.isConnected) return false;
   await api('config/model/save', {
     file,
     revision: model.revision,
@@ -148,7 +150,56 @@ async function reviewPlan(
   return true;
 }
 
-function conflictAlert(error: unknown, reload: () => void) {
+function configActions(
+  editable: boolean,
+  save: () => Promise<void>,
+  reload: (activate?: boolean) => Promise<void>,
+) {
+  return [
+    button('Review changes', {
+      kind: 'primary',
+      icon: 'check',
+      disabled: !editable,
+      onClick: () => void save(),
+    }),
+    button('Reload files', {
+      kind: 'ghost',
+      icon: 'refresh',
+      onClick: () => void reload(),
+    }),
+    button('Validate and activate disk configuration', {
+      kind: 'secondary',
+      onClick: () => void reload(true),
+    }),
+  ];
+}
+
+function setEditorBusy(screen: HTMLElement, busy: boolean) {
+  screen.inert = busy;
+  screen.setAttribute('aria-busy', String(busy));
+}
+
+async function readConfiguration(screen: HTMLElement, dirty: boolean, activate: boolean) {
+  if (activate || dirty) {
+    const confirmed = await confirmDialog({
+      title: activate ? 'Validate and activate disk configuration?' : 'Discard unsaved changes?',
+      body: activate
+        ? `The importer will validate and activate all configuration files currently on disk.${dirty ? ' This discards your current draft.' : ''}`
+        : 'Reloading reads the files from disk and discards your current draft.',
+      confirmLabel: activate ? 'Validate and activate' : 'Discard and reload',
+      tone: dirty ? 'danger' : 'primary',
+    });
+    if (!confirmed || !screen.isConnected) return;
+  }
+  if (activate) {
+    const { revision } = await fetchSource();
+    if (!screen.isConnected) return;
+    await api('config/reload', { revision });
+  }
+  return fetchModel();
+}
+
+function conflictAlert(error: unknown, reload: () => void, title = 'Configuration not saved') {
   const message = error instanceof Error ? error.message : 'Configuration change failed';
   return alertBox(
     el(
@@ -158,12 +209,48 @@ function conflictAlert(error: unknown, reload: () => void) {
       el(
         'div',
         { class: 'form-actions' },
-        button('Reload configuration', { kind: 'secondary', onClick: reload }),
+        button('Refresh configuration files', { kind: 'secondary', onClick: reload }),
       ),
     ),
     'danger',
-    'Configuration not saved',
+    title,
   );
+}
+
+function configReloader(
+  screen: HTMLElement,
+  isDirty: () => boolean,
+  updateDraft: (model: ConfigModelView) => void,
+  showError: (error: HTMLElement) => void,
+  render: () => void,
+) {
+  async function reload(activate = false) {
+    if (screen.inert) return;
+    setEditorBusy(screen, true);
+    try {
+      const updated = await readConfiguration(screen, isDirty(), activate);
+      if (!updated || !screen.isConnected) return;
+      updateDraft(updated);
+      toast(
+        activate ? 'Disk configuration validated and activated' : 'Configuration files reloaded',
+        activate ? 'positive' : 'neutral',
+      );
+    } catch (caught) {
+      showError(
+        conflictAlert(
+          caught,
+          () => void reload(),
+          activate
+            ? 'Disk configuration activation failed'
+            : 'Configuration files could not be reloaded',
+        ),
+      );
+    } finally {
+      setEditorBusy(screen, false);
+      if (screen.isConnected) render();
+    }
+  }
+  return reload;
 }
 
 export async function renderAccounts(host: HTMLElement) {
@@ -180,32 +267,18 @@ export async function renderAccounts(host: HTMLElement) {
     );
     return;
   }
+  if (!screen.isConnected) return;
   let rules = rulesFromAccounts(model.accounts);
   let bankFeesCategory = model.accounts.bankFeesCategory ?? '';
   let useAllEligible = model.accounts.eligibleCategories === undefined;
   let eligible = [...(model.accounts.eligibleCategories ?? [])];
   let dirty = false;
-  let busy = false;
   let errorNode: HTMLElement | null = null;
-  const editable = model.editableFiles.accounts;
+  let editable = model.editableFiles.accounts;
   setDirtyGuard(() => dirty);
 
   const render = () => {
     const groups = groupRules(rules);
-    const actions = [
-      button('Review changes', {
-        kind: 'primary',
-        icon: 'check',
-        disabled: !editable || busy,
-        onClick: () => void save(),
-      }),
-      button('Reload', {
-        kind: 'ghost',
-        icon: 'refresh',
-        disabled: busy,
-        onClick: () => void reload(),
-      }),
-    ];
     const accountListId = `account-list-${draftKey()}`;
     const accountList = el(
       'datalist',
@@ -324,7 +397,7 @@ export async function renderAccounts(host: HTMLElement) {
         eyebrow: 'Configuration',
         description:
           'Map SMS account references to existing Actual accounts. No YAML editing required.',
-        actions,
+        actions: configActions(editable, save, reload),
       }),
       revisionState(model),
       !editable
@@ -501,61 +574,49 @@ export async function renderAccounts(host: HTMLElement) {
   }
 
   async function save() {
-    if (busy) return;
+    if (screen.inert) return;
     if (!useAllEligible && !eligible.length) {
       toast('Select at least one eligible category or use all eligible categories', 'warning');
       return;
     }
-    busy = true;
-    errorNode = null;
-    render();
-    const plan = planAccountPatches(model.accounts, rules, {
-      bankFeesCategory,
-      eligibleCategories: useAllEligible ? undefined : eligible,
-    });
+    setEditorBusy(screen, true);
     try {
-      const saved = await reviewPlan('accounts', plan, model);
-      if (!saved) return;
-      model = await fetchModel();
-      rules = rulesFromAccounts(model.accounts);
-      bankFeesCategory = model.accounts.bankFeesCategory ?? '';
-      useAllEligible = model.accounts.eligibleCategories === undefined;
-      eligible = [...(model.accounts.eligibleCategories ?? [])];
-      dirty = false;
+      const plan = planAccountPatches(model.accounts, rules, {
+        bankFeesCategory,
+        eligibleCategories: useAllEligible ? undefined : eligible,
+      });
+      const saved = await reviewPlan(screen, 'accounts', plan, model);
+      if (!saved || !screen.isConnected) return;
+      const updated = await fetchModel();
+      if (!screen.isConnected) return;
+      updateDraft(updated);
       toast('Routing configuration saved and activated', 'positive');
     } catch (caught) {
       errorNode = conflictAlert(caught, () => void reload());
     } finally {
-      busy = false;
-      render();
+      setEditorBusy(screen, false);
+      if (screen.isConnected) render();
     }
   }
 
-  async function reload() {
-    if (dirty) {
-      const confirmed = await confirmDialog({
-        title: 'Discard unsaved changes?',
-        body: 'Reloading reads the files from disk and discards your current draft.',
-        confirmLabel: 'Discard and reload',
-        tone: 'danger',
-      });
-      if (!confirmed) return;
-    }
-    try {
-      model = await fetchModel();
-      rules = rulesFromAccounts(model.accounts);
-      bankFeesCategory = model.accounts.bankFeesCategory ?? '';
-      useAllEligible = model.accounts.eligibleCategories === undefined;
-      eligible = [...(model.accounts.eligibleCategories ?? [])];
-      dirty = false;
-      errorNode = null;
-      toast('Configuration reloaded', 'neutral');
-      render();
-    } catch (caught) {
-      errorNode = conflictAlert(caught, () => void reload());
-      render();
-    }
+  function updateDraft(updated: ConfigModelView) {
+    model = updated;
+    editable = model.editableFiles.accounts;
+    rules = rulesFromAccounts(model.accounts);
+    bankFeesCategory = model.accounts.bankFeesCategory ?? '';
+    useAllEligible = model.accounts.eligibleCategories === undefined;
+    eligible = [...(model.accounts.eligibleCategories ?? [])];
+    dirty = false;
+    errorNode = null;
   }
+
+  const reload = configReloader(
+    screen,
+    () => dirty,
+    updateDraft,
+    error => (errorNode = error),
+    render,
+  );
 
   render();
   return () => setDirtyGuard();
@@ -575,11 +636,11 @@ export async function renderBanks(host: HTMLElement) {
     );
     return;
   }
+  if (!screen.isConnected) return;
   let banks = banksFromConfig(model.banks);
   let dirty = false;
-  let busy = false;
   let errorNode: HTMLElement | null = null;
-  const editable = model.editableFiles.banks;
+  let editable = model.editableFiles.banks;
   setDirtyGuard(() => dirty);
 
   const markDirty = () => {
@@ -655,11 +716,12 @@ export async function renderBanks(host: HTMLElement) {
         },
       });
       const templates = el('div', { class: 'checkbox-list' });
-      if (!model.parsing.templates.length)
+      const parsingTemplates = model.parsing.templates ?? [];
+      if (!parsingTemplates.length)
         templates.append(
           el('p', { class: 'muted small', text: 'No parsing templates are defined.' }),
         );
-      for (const template of model.parsing.templates) {
+      for (const template of parsingTemplates) {
         const input = el('input', { type: 'checkbox', value: template.id });
         input.checked = bank.templates.includes(template.id);
         input.disabled = !editable;
@@ -723,20 +785,7 @@ export async function renderBanks(host: HTMLElement) {
         title: 'Banks',
         eyebrow: 'Configuration',
         description: 'Stable bank IDs, sender aliases, and import disposition.',
-        actions: [
-          button('Review changes', {
-            kind: 'primary',
-            icon: 'check',
-            disabled: !editable || busy,
-            onClick: () => void save(),
-          }),
-          button('Reload', {
-            kind: 'ghost',
-            icon: 'refresh',
-            disabled: busy,
-            onClick: () => void reload(),
-          }),
-        ],
+        actions: configActions(editable, save, reload),
       }),
       revisionState(model),
       !editable
@@ -785,48 +834,39 @@ export async function renderBanks(host: HTMLElement) {
   };
 
   async function save() {
-    if (busy) return;
-    busy = true;
-    errorNode = null;
-    render();
-    const plan = planBankPatches(model.banks, banks);
+    if (screen.inert) return;
+    setEditorBusy(screen, true);
     try {
-      const saved = await reviewPlan('banks', plan, model);
-      if (!saved) return;
-      model = await fetchModel();
-      banks = banksFromConfig(model.banks);
-      dirty = false;
+      const plan = planBankPatches(model.banks, banks);
+      const saved = await reviewPlan(screen, 'banks', plan, model);
+      if (!saved || !screen.isConnected) return;
+      const updated = await fetchModel();
+      if (!screen.isConnected) return;
+      updateDraft(updated);
       toast('Bank configuration saved and activated', 'positive');
     } catch (caught) {
       errorNode = conflictAlert(caught, () => void reload());
     } finally {
-      busy = false;
-      render();
+      setEditorBusy(screen, false);
+      if (screen.isConnected) render();
     }
   }
 
-  async function reload() {
-    if (dirty) {
-      const confirmed = await confirmDialog({
-        title: 'Discard unsaved changes?',
-        body: 'Reloading reads the files from disk and discards your current draft.',
-        confirmLabel: 'Discard and reload',
-        tone: 'danger',
-      });
-      if (!confirmed) return;
-    }
-    try {
-      model = await fetchModel();
-      banks = banksFromConfig(model.banks);
-      dirty = false;
-      errorNode = null;
-      toast('Configuration reloaded', 'neutral');
-      render();
-    } catch (caught) {
-      errorNode = conflictAlert(caught, () => void reload());
-      render();
-    }
+  function updateDraft(updated: ConfigModelView) {
+    model = updated;
+    editable = model.editableFiles.banks;
+    banks = banksFromConfig(model.banks);
+    dirty = false;
+    errorNode = null;
   }
+
+  const reload = configReloader(
+    screen,
+    () => dirty,
+    updateDraft,
+    error => (errorNode = error),
+    render,
+  );
 
   render();
   return () => setDirtyGuard();
@@ -846,11 +886,11 @@ export async function renderParsing(host: HTMLElement) {
     );
     return;
   }
+  if (!screen.isConnected) return;
   let draft = parsingFromConfig(model.parsing);
   let dirty = false;
-  let busy = false;
   let errorNode: HTMLElement | null = null;
-  const editable = model.editableFiles.parsing;
+  let editable = model.editableFiles.parsing;
   setDirtyGuard(() => dirty);
 
   const resultHost = el('div', { class: 'test-result' });
@@ -1434,22 +1474,7 @@ export async function renderParsing(host: HTMLElement) {
         eyebrow: 'Configuration',
         description:
           'Edit the English/Arabic grammar or inspect the active rules and test a message.',
-        actions: editable
-          ? [
-              button('Review changes', {
-                kind: 'primary',
-                icon: 'check',
-                disabled: busy,
-                onClick: () => void save(),
-              }),
-              button('Reload', {
-                kind: 'ghost',
-                icon: 'refresh',
-                disabled: busy,
-                onClick: () => void reload(),
-              }),
-            ]
-          : [],
+        actions: configActions(editable, save, reload),
       }),
       revisionState(model),
       !editable
@@ -1477,48 +1502,39 @@ export async function renderParsing(host: HTMLElement) {
   }
 
   async function save() {
-    if (busy) return;
-    busy = true;
-    errorNode = null;
-    render();
-    const plan = planParsingPatches(model.parsing, draft);
+    if (screen.inert) return;
+    setEditorBusy(screen, true);
     try {
-      const saved = await reviewPlan('parsing', plan, model);
-      if (!saved) return;
-      model = await fetchModel();
-      draft = parsingFromConfig(model.parsing);
-      dirty = false;
+      const plan = planParsingPatches(model.parsing, draft);
+      const saved = await reviewPlan(screen, 'parsing', plan, model);
+      if (!saved || !screen.isConnected) return;
+      const updated = await fetchModel();
+      if (!screen.isConnected) return;
+      updateDraft(updated);
       toast('Recognition configuration saved and activated', 'positive');
     } catch (caught) {
       errorNode = conflictAlert(caught, () => void reload());
     } finally {
-      busy = false;
-      render();
+      setEditorBusy(screen, false);
+      if (screen.isConnected) render();
     }
   }
 
-  async function reload() {
-    if (dirty) {
-      const confirmed = await confirmDialog({
-        title: 'Discard unsaved changes?',
-        body: 'Reloading reads the files from disk and discards your current draft.',
-        confirmLabel: 'Discard and reload',
-        tone: 'danger',
-      });
-      if (!confirmed) return;
-    }
-    try {
-      model = await fetchModel();
-      draft = parsingFromConfig(model.parsing);
-      dirty = false;
-      errorNode = null;
-      toast('Configuration reloaded', 'neutral');
-      render();
-    } catch (caught) {
-      errorNode = conflictAlert(caught, () => void reload());
-      render();
-    }
+  function updateDraft(updated: ConfigModelView) {
+    model = updated;
+    editable = model.editableFiles.parsing;
+    draft = parsingFromConfig(model.parsing);
+    dirty = false;
+    errorNode = null;
   }
+
+  const reload = configReloader(
+    screen,
+    () => dirty,
+    updateDraft,
+    error => (errorNode = error),
+    render,
+  );
 
   render();
   return () => setDirtyGuard();

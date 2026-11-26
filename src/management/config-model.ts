@@ -121,9 +121,15 @@ export function applyConfigPatches(files: ConfigFiles, file: ConfigFile, patches
     else if (patch.op === 'delete') doc.deleteIn(patch.path);
     else if (patch.op === 'insert') {
       const container = doc.getIn(patch.path, true);
-      if (!isSeq(container))
-        throw new ConfigurationError('Configuration insert target is not a list');
-      container.add(doc.createNode(patch.value));
+      if (isSeq(container)) container.add(doc.createNode(patch.value));
+      else if (
+        file === 'parsing' &&
+        patch.path.length === 1 &&
+        patch.path[0] === 'templates' &&
+        !doc.hasIn(patch.path)
+      )
+        doc.setIn(patch.path, doc.createNode([patch.value]));
+      else throw new ConfigurationError('Configuration insert target is not a list');
     } else {
       const container = doc.getIn(patch.path, true);
       if (!isSeq(container))

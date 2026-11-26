@@ -134,6 +134,24 @@ describe('structured configuration patches', () => {
     ).toThrow('out of range');
   });
 
+  it('inserts the first templates when the optional list is omitted', () => {
+    const withoutTemplates = { ...files, parsing: files.parsing.replace('templates: []\n', '') };
+    const templates = ['first', 'second'].map(id => ({
+      id,
+      kind: 'purchase',
+      match: [{ source: id, flags: 'iu' }],
+      fields: {},
+      required: [],
+    }));
+    const text = applyConfigPatches(
+      withoutTemplates,
+      'parsing',
+      templates.map(value => ({ file: 'parsing', op: 'insert', path: ['templates'], value })),
+    );
+    expect(parsing(text).templates).toEqual(templates);
+    expect(parsing(text).shared).toEqual(parsing(files.parsing).shared);
+  });
+
   it('extracts the editable model from all three files', () => {
     const model = modelFromFiles(files);
     expect(model.accounts.bankFeesCategory).toBe('Bank Fees');

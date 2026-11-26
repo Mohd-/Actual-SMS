@@ -124,17 +124,17 @@ For a non-Docker deployment, set `MANAGEMENT_ENABLED=1` and `MANAGEMENT_EDIT_ACC
 3. Select **Review changes**, review the summary, and confirm **Save and activate**.
 4. The operation drains engine work, validates the complete configuration, checks the revision again, writes atomically, and activates the derived snapshot.
 
-Confirmation is bound to the exact draft and file revision. Editing or reloading clears confirmation; stale responses cannot authorize newer edits. While saving, the editor and conflicting configuration controls are locked until the operation finishes.
+Confirmation is bound to the exact draft and file revision. The editor and its controls stay locked from the start of validation through confirmation and activation. Cancelling the review returns you to your draft.
 
-Preview and save each perform a server-backed Actual sync before resolving accounts and categories from the local budget. A previous successful connection or cached account list is not sufficient. Invalid candidates leave a healthy importer running with its old configuration. A sync/connection failure instead rejects the operation before any file replacement or recovery-copy creation, keeps imports paused without consuming queued-event attempts, and exposes a sanitized status error. After fixing the connection, use **Reconnect Actual** or **Reload** on the affected configuration screen. A successful preview alone does not resume paused imports.
+Preview and save each perform a server-backed Actual sync before resolving accounts and categories from the local budget. A previous successful connection or cached account list is not sufficient. Invalid candidates leave a healthy importer running with its old configuration. A sync/connection failure instead rejects the operation before any file replacement or recovery-copy creation, keeps imports paused without consuming queued-event attempts, and exposes a sanitized status error. After fixing the connection, use **Reconnect Actual** or **Validate and activate disk configuration**. A successful preview alone does not resume paused imports.
 
-If another browser or an external edit changed any configuration dependency, saving returns a conflict. The draft remains visible; reload and review the newer content rather than overwriting it blindly. Revision checks are not a lock on arbitrary editors: coordinate a maintenance window and do not write externally during a browser save.
+If another browser or an external edit changed any configuration dependency, saving returns a conflict. The draft remains visible. Use **Reload files** to refresh the editor and review the newer content. Revision checks are not a lock on arbitrary editors: coordinate a maintenance window and do not write externally during a browser save.
 
 A protected `accounts.yaml.previous` copy is created on the first browser save and never overwritten automatically. It is an operator recovery copy, not runtime configuration; rotate or replace it deliberately when appropriate. The application does not keep every historical YAML version. Temporary replacement files are removed after failures where possible. Back up the configured files independently.
 
-If replacement completed but activation/durability became uncertain, imports remain paused. Inspect the files and displayed revisions, then use **Reload** or restart after fixing the cause. Do not treat an error as a successful active change. The application does not automatically restore an older file over a possible external edit.
+If replacement completed but activation/durability became uncertain, imports remain paused. Inspect the files and displayed revisions, then use **Validate and activate disk configuration** or restart after fixing the cause. Do not treat an error as a successful active change. The application does not automatically restore an older file over a possible external edit.
 
-External edits still take effect on restart. **Reload** validates and activates the files currently on disk, with the same runtime coordination. There is no file watcher or automatic historical SMS replay.
+External edits still take effect on restart. From any configuration screen, **Validate and activate disk configuration** validates and activates the current files together without restarting. **Reload files** refreshes the editor and leaves the running configuration unchanged. There is no file watcher or automatic historical SMS replay.
 
 ## Edit the bank registry
 
